@@ -1,6 +1,6 @@
-#include <string.h>
-#include <assert.h>
-#include <stdio.h>
+#include <cstring>
+#include <cassert>
+#include <cstdio>
 #include "kseq.h"
 #include "kann_data.h"
 #ifdef HAVE_ZLIB

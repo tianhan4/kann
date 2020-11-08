@@ -1,10 +1,26 @@
-#include <stdlib.h>
-#include <assert.h>
-#include <stdarg.h>
-#include <string.h>
-#include <float.h>
-#include <math.h>
 #include "kautodiff.h"
+#include <cstdlib>
+#include <cassert>
+#include <cstdarg>
+#include <string>
+#include <vector>
+#include <cfloat>
+#include <cmath>
+#include <iostream>
+
+#ifndef _DEBUG // works in VS
+#define DEBUG(x) 
+#else
+#define DEBUG(x) do { std::cerr << x << std::endl; } while (0)
+#endif
+
+bool remote = false; 
+std::shared_ptr<SEALEngine> engine;
+SEALPlaintext *plaintext;
+SEALCiphertext *ciphertext;
+vector<double> t;
+vector<double> test_t;   
+vector<double> truth_t;
 
 typedef struct {
 	uint64_t s[2];
@@ -17,17 +33,20 @@ typedef struct {
  * Graph construction *
  **********************/
 
+// Create a kad_node_t (internal, op), delay the memory allocation part.
 static inline kad_node_t *kad_new_core(int n_d, int op, int n_child)
 {
 	kad_node_t *s;
 	if (n_d >= KAD_MAX_DIM) return 0;
 	s = (kad_node_t*)calloc(1, sizeof(kad_node_t));
+	s->flag |= SEAL_CIPHER; // All core nodes are encrypted in our framework.
 	s->n_d = n_d, s->op = op, s->n_child = n_child;
 	if (s->n_child) s->child = (kad_node_t**)calloc(s->n_child, sizeof(kad_node_t*));
 	return s;
 }
 
-static inline kad_node_t *kad_vleaf(uint8_t flag, float *x, float *g, int n_d, va_list ap)
+// Create a kad_node_t (leaf, const/variable/feed), with given memory pointers.
+static inline kad_node_t *kad_vleaf(uint8_t flag, float *x, float *g, SEALCiphertext *x_c, SEALCiphertext *g_c, int n_d, va_list ap)
 {
 	int i;
 	kad_node_t *p;
@@ -37,39 +56,73 @@ static inline kad_node_t *kad_vleaf(uint8_t flag, float *x, float *g, int n_d, v
 	for (i = 0; i < n_d; ++i)
 		p->d[i] = va_arg(ap, int32_t);
 	p->x = x, p->g = g, p->flag = flag;
+    p->x_c = x_c, p->g_c = g_c;
+	if(p->x_c){
+        p->flag |= SEAL_CIPHER;
+    }
 	return p;
 }
 
+// DEPRECATED? We assume all const to be plain.
+// Create a encrypted const node.
+/**
+kad_node_t *kad_const(SEALCiphertext *x_c, int n_d, ...){
+    kad_node_t *p;
+    va_list ap;
+    va_start(ap, n_d); p = kad_vleaf(KAD_CONST, 0, 0, x_c, 0, n_d, ap); 
+    va_end(ap);
+    return p;
+}
+**/
+
+// Create a plain const node.
 kad_node_t *kad_const(float *x, int n_d, ...)
 {
 	kad_node_t *p;
 	va_list ap;
-	va_start(ap, n_d); p = kad_vleaf(KAD_CONST, x, 0, n_d, ap); va_end(ap);
+	va_start(ap, n_d); p = kad_vleaf(KAD_CONST, x, 0, 0, 0, n_d, ap); va_end(ap);
 	return p;
 }
 
+// Create a feed node. (must be encrypted)
 kad_node_t *kad_feed(int n_d, ...)
 {
 	kad_node_t *p;
 	va_list ap;
-	va_start(ap, n_d); p = kad_vleaf(0, 0, 0, n_d, ap); va_end(ap);
+	va_start(ap, n_d); p = kad_vleaf(0, 0, 0, 0, 0, n_d, ap); va_end(ap);
+	p->flag |= SEAL_CIPHER;
 	return p;
 }
 
+// Create a var node.
+// Comment: Not used in KANN... KANN uses kann_new_leaf_array to create new leaves.
+kad_node_t *kad_var(SEALCiphertext *x_c, SEALCiphertext *g_c, int n_d, ...){
+	kad_node_t *p;
+	va_list ap;
+	va_start(ap, n_d); p = kad_vleaf(KAD_VAR, 0, 0, x_c, g_c, n_d, ap); va_end(ap);
+	return p;
+}
+
+
+// Create a var node.
+// Comment: Not used in KANN... KANN uses kann_new_leaf_array to create new leaves.
 kad_node_t *kad_var(float *x, float *g, int n_d, ...)
 {
 	kad_node_t *p;
 	va_list ap;
-	va_start(ap, n_d); p = kad_vleaf(KAD_VAR, x, g, n_d, ap); va_end(ap);
+	va_start(ap, n_d); p = kad_vleaf(KAD_VAR, x, g, 0, 0, n_d, ap); va_end(ap);
 	return p;
 }
 
+
+// Check KAD_SYNC_DIM action (whether consistent with its children?); add flags(var, cipher) based on node information.
 static inline kad_node_t *kad_finalize_node(kad_node_t *s) /* a helper function */
 {
 	int i;
 	if (kad_op_list[s->op](s, KAD_SYNC_DIM) < 0) { /* check dimension */
-		if (s->ptr) free(s->ptr);
-		free(s->child); free(s);
+		cout << "node sync dimension failed! op type: " << s->op << endl;
+		if (s->ptr) std::free(s->ptr);
+		std::free(s->child); std::free(s);
 		return 0;
 	}
 	for (i = 0; i < s->n_child; ++i)
@@ -81,6 +134,7 @@ static inline kad_node_t *kad_finalize_node(kad_node_t *s) /* a helper function 
 
 /********** Simple arithmetic **********/
 
+// Create a core node with 2 children.
 static inline kad_node_t *kad_op2_core(int op, kad_node_t *x, kad_node_t *y)
 {
 	kad_node_t *s;
@@ -89,6 +143,7 @@ static inline kad_node_t *kad_op2_core(int op, kad_node_t *x, kad_node_t *y)
 	return kad_finalize_node(s);
 }
 
+// Create a core node with 1 child.
 static inline kad_node_t *kad_op1_core(int op, kad_node_t *x)
 {
 	kad_node_t *s;
@@ -122,6 +177,7 @@ KAD_FUNC_OP1(kad_1minus, 11)
 KAD_FUNC_OP1(kad_softmax, 14)
 KAD_FUNC_OP1(kad_stdnorm, 32)
 
+
 kad_node_t *kad_ce_multi_weighted(kad_node_t *pred, kad_node_t *truth, kad_node_t *weight)
 {
 	kad_node_t *s;
@@ -133,6 +189,7 @@ kad_node_t *kad_ce_multi_weighted(kad_node_t *pred, kad_node_t *truth, kad_node_
 /********** Convolution **********/
 
 /* compute output dimension and padding sizes on both sides */
+// what is pad0?
 static inline int conv_find_par(int in_size, int kernel_size, int stride, int pad0, int *new_pad0, int *new_pad1)
 {
 	int out_size, pad_both;
@@ -149,6 +206,8 @@ typedef struct {
 	int kernel_size, stride, pad[2];
 } conv_conf_t;
 
+
+// create cnn related information: strides, paddings and kernel sizes.
 static inline conv_conf_t *conv2d_gen_aux(int in_row, int in_col, int kernel_r, int kernel_c, int stride_r, int stride_c, int top_pad, int left_pad)
 {
 	conv_conf_t *cnn;
@@ -163,10 +222,10 @@ static inline conv_conf_t *conv2d_gen_aux(int in_row, int in_col, int kernel_r, 
 kad_node_t *kad_conv2d(kad_node_t *x, kad_node_t *w, int stride_r, int stride_c, int top_pad, int left_pad)
 {
 	kad_node_t *s;
-	if (x->n_d != 4 || w->n_d != 4) return 0;
+	if (x->n_d != 3 || w->n_d != 4) return 0;
 	s = kad_new_core(0, 16, 2);
 	s->child[0] = x, s->child[1] = w;
-	s->ptr = conv2d_gen_aux(x->d[2], x->d[3], w->d[2], w->d[3], stride_r, stride_c, top_pad, left_pad);
+	s->ptr = conv2d_gen_aux(x->d[1], x->d[2], w->d[2], w->d[3], stride_r, stride_c, top_pad, left_pad);
 	s->ptr_size = sizeof(conv_conf_t) * 2;
 	return kad_finalize_node(s);
 }
@@ -174,53 +233,11 @@ kad_node_t *kad_conv2d(kad_node_t *x, kad_node_t *w, int stride_r, int stride_c,
 kad_node_t *kad_max2d(kad_node_t *x, int kernel_r, int kernel_c, int stride_r, int stride_c, int top_pad, int left_pad)
 {
 	kad_node_t *s;
-	if (x->n_d != 4) return 0;
+	if (x->n_d != 3) return 0;
 	s = kad_new_core(0, 17, 1);
 	s->child[0] = x;
-	s->ptr = conv2d_gen_aux(x->d[2], x->d[3], kernel_r, kernel_c, stride_r, stride_c, top_pad, left_pad);
+	s->ptr = conv2d_gen_aux(x->d[1], x->d[2], kernel_r, kernel_c, stride_r, stride_c, top_pad, left_pad);
 	s->ptr_size = sizeof(conv_conf_t) * 2;
-	return kad_finalize_node(s);
-}
-
-static inline conv_conf_t *conv1d_gen_aux(int in_col, int kernel_c, int stride_c, int left_pad)
-{
-	conv_conf_t *cnn;
-	cnn = (conv_conf_t*)calloc(1, sizeof(conv_conf_t));
-	cnn->kernel_size = kernel_c, cnn->stride = stride_c;
-	conv_find_par(in_col, kernel_c, stride_c, left_pad, &cnn->pad[0], &cnn->pad[1]);
-	return cnn;
-}
-
-kad_node_t *kad_conv1d(kad_node_t *x, kad_node_t *w, int stride, int left_pad)
-{
-	kad_node_t *s;
-	if (x->n_d != 3 || w->n_d != 3) return 0;
-	s = kad_new_core(0, 18, 2);
-	s->child[0] = x, s->child[1] = w;
-	s->ptr = conv1d_gen_aux(x->d[2], w->d[2], stride, left_pad);
-	s->ptr_size = sizeof(conv_conf_t);
-	return kad_finalize_node(s);
-}
-
-kad_node_t *kad_max1d(kad_node_t *x, int kernel_size, int stride, int left_pad)
-{
-	kad_node_t *s;
-	if (x->n_d != 3) return 0;
-	s = kad_new_core(0, 19, 1);
-	s->child[0] = x;
-	s->ptr = conv1d_gen_aux(x->d[2], kernel_size, stride, left_pad);
-	s->ptr_size = sizeof(conv_conf_t);
-	return kad_finalize_node(s);
-}
-
-kad_node_t *kad_avg1d(kad_node_t *x, int kernel_size, int stride, int left_pad)
-{
-	kad_node_t *s;
-	if (x->n_d != 3) return 0;
-	s = kad_new_core(0, 28, 1);
-	s->child[0] = x;
-	s->ptr = conv1d_gen_aux(x->d[2], kernel_size, stride, left_pad);
-	s->ptr_size = sizeof(conv_conf_t);
 	return kad_finalize_node(s);
 }
 
@@ -254,7 +271,7 @@ kad_node_t *kad_select(int n, kad_node_t **x, int which)
 }
 
 /********** Dimension reduction **********/
-
+/**
 static kad_node_t *kad_reduce_general(int op, kad_node_t *x, int axis)
 {
 	kad_node_t *s;
@@ -269,7 +286,7 @@ static kad_node_t *kad_reduce_general(int op, kad_node_t *x, int axis)
 
 kad_node_t *kad_reduce_sum(kad_node_t *x, int axis)  { return kad_reduce_general(25, x, axis); }
 kad_node_t *kad_reduce_mean(kad_node_t *x, int axis) { return kad_reduce_general(26, x, axis); }
-
+**/
 /********** Sampling related **********/
 
 kad_node_t *kad_dropout(kad_node_t *x, kad_node_t *y)
@@ -289,7 +306,7 @@ kad_node_t *kad_sample_normal(kad_node_t *x)
 }
 
 /********** Miscellaneous **********/
-
+/**
 kad_node_t *kad_slice(kad_node_t *x, int axis, int start, int end)
 {
 	kad_node_t *s;
@@ -326,7 +343,7 @@ kad_node_t *kad_concat(int axis, int n, ...)
 	for (i = 0; i < n; ++i) p[i] = va_arg(ap, kad_node_p);
 	va_end(ap);
 	s = kad_concat_array(axis, n, p);
-	free(p);
+	std::free(p);
 	return s;
 }
 
@@ -353,7 +370,7 @@ kad_node_t *kad_reverse(kad_node_t *x, int axis)
 	s->child[0] = x, s->ptr = aux, s->ptr_size = 4;
 	return kad_finalize_node(s);
 }
-
+**/
 kad_node_t *kad_switch(int n, kad_node_t **p)
 {
 	kad_node_t *s;
@@ -383,39 +400,32 @@ static void kad_mark_back(int n, kad_node_t **v)
 	}
 }
 
+//think carefully about the reallocation: we cannot afford calling it often.
+// allocate internal nodes memory.
+// Assumption: All internal nodes are encrypted.
 static void kad_allocate_internal(int n, kad_node_t **v)
 {
-	int i;
+	int i, j;
 	kad_mark_back(n, v);
 	for (i = 0; i < n; ++i) {
 		kad_node_t *p = v[i];
 		if (p->n_child == 0) continue;
-		p->x = (float*)realloc(p->x, kad_len(p) * sizeof(float));
-		if (kad_is_back(p)) {
-			p->g = (float*)realloc(p->g, kad_len(p) * sizeof(float));
-			kad_op_list[p->op](p, KAD_ALLOC);
-		}
+		if(p->x_c) delete[] p->x_c;
+        p->x_c = new SEALCiphertext[kad_len(p)];
+		for(j = 0; j< kad_len(p); j++)
+			p->x_c[j].init(engine);
+        if (kad_is_back(p)) {
+			if(p->g_c) delete[] p->g_c;
+			p->g_c = new SEALCiphertext[kad_len(p)];
+			for(j = 0; j< kad_len(p); j++)
+				p->g_c[j].init(engine);
+			if(p->g) delete[] p->g;	
+			p->g = new float[kad_len(p)];
+            kad_op_list[p->op](p, KAD_ALLOC);
+        }
 	}
 }
-
-int kad_sync_dim(int n, kad_node_t **v, int batch_size)
-{
-	int i, req_alloc = 0, req_sync = 0, old_size = 0;
-	for (i = 0; i < n; ++i) {
-		if (kad_is_feed(v[i])) {
-			old_size = v[i]->d[0]; /* TODO: check if all feeds have the same batch size */
-			if (batch_size > 0 && v[i]->d[0] != batch_size)
-				v[i]->d[0] = batch_size, req_sync = 1;
-		} else if (v[i]->n_child > 0 && req_sync)
-			kad_op_list[v[i]->op](v[i], KAD_SYNC_DIM);
-	}
-	if (old_size < batch_size) req_alloc = 1;
-	for (i = 0; i < n; ++i)
-		if (v[i]->n_child > 0 && v[i]->x == 0) req_alloc = 1;
-	if (req_alloc) kad_allocate_internal(n, v);
-	return batch_size > 0? batch_size : old_size;
-}
-
+    
 #define kvec_t(type) struct { size_t n, m; type *a; }
 
 #define kv_pop(v) ((v).a[--(v).n])
@@ -429,6 +439,8 @@ int kad_sync_dim(int n, kad_node_t **v, int batch_size)
 	} while (0)
 
 /* IMPORTANT: kad_node_t::tmp MUST BE set to zero before calling this function */
+// topological sorting nodes, given multiple tree roots, list the nodes including leaves and internal nodes all into a list, 
+// then allocate memory for internal nodes.
 kad_node_t **kad_compile_array(int *n_node, int n_roots, kad_node_t **roots)
 {
 	int i;
@@ -436,7 +448,7 @@ kad_node_t **kad_compile_array(int *n_node, int n_roots, kad_node_t **roots)
 
 	/* generate kad_node_t::tmp, the count of the parent nodes; shifted by 1; lowest bit to detect fake roots */
 	for (i = 0; i < n_roots; ++i) {
-		roots[i]->tmp = 1; /* mark the root */
+		roots[i]->tmp = 1; /* mark the root */ 
 		kv_push(kad_node_p, stack, roots[i]);
 	}
 	while (stack.n) {
@@ -461,7 +473,7 @@ kad_node_t **kad_compile_array(int *n_node, int n_roots, kad_node_t **roots)
 				kv_push(kad_node_p, stack, p->child[i]);
 		}
 	}
-	free(stack.a);
+	std::free(stack.a);
 	for (i = 0; i < (int)a.n; ++i) { /* check cycles; no cycles if constructed with kad_add() etc */
 		assert(a.a[i]->tmp>>1 == 0);
 		a.a[i]->tmp = 0;
@@ -478,6 +490,7 @@ kad_node_t **kad_compile_array(int *n_node, int n_roots, kad_node_t **roots)
 	return a.a;
 }
 
+// kad_compile: from variange roots to root list, then call kad_compile_array.
 kad_node_t **kad_compile(int *n_node, int n_roots, ...)
 {
 	int i;
@@ -489,7 +502,7 @@ kad_node_t **kad_compile(int *n_node, int n_roots, ...)
 	for (i = 0; i < n_roots; ++i) roots[i] = va_arg(ap, kad_node_p);
 	va_end(ap);
 	ret = kad_compile_array(n_node, n_roots, roots);
-	free(roots);
+	std::free(roots);
 	return ret;
 }
 
@@ -497,17 +510,23 @@ kad_node_t **kad_compile(int *n_node, int n_roots, ...)
  * Miscellaneous on compiled graphs *
  ************************************/
 
+// Only free internal memory.
 void kad_delete(int n, kad_node_t **a)
 {
 	int i;
 	for (i = 0; i < n; ++i) {
 		kad_node_t *p = a[i];
+		cout << "delete node " << i << endl;
 		if (p->n_child) {
-			free(p->x); free(p->g);
+			// All internal nodes are encrypted.
+			delete[] p->x_c, p->g_c, p->g; 
 		}
-		free(p->child); free(p->ptr); free(p->gtmp); free(p);
+		std::free(p->child); 
+		std::free(p->ptr); 
+		std::free(p->gtmp); 
+		std::free(p);
 	}
-	free(a);
+	std::free(a);
 }
 
 int kad_size_var(int n, kad_node_t *const* v)
@@ -518,6 +537,17 @@ int kad_size_var(int n, kad_node_t *const* v)
 			c += kad_len(v[i]);
 	return c;
 }
+
+
+int kad_size_encrypted_var(int n, kad_node_t *const* v){
+	int c, i;
+	for (i = c = 0; i < n; ++i)
+		if (kad_is_var(v[i]) && seal_is_encrypted(v[i]))
+			c += kad_len(v[i]);
+	return c;
+}
+
+
 
 int kad_size_const(int n, kad_node_t *const* v)
 {
@@ -532,6 +562,7 @@ int kad_size_const(int n, kad_node_t *const* v)
  * Computate values and gradients *
  **********************************/
 
+// Propagate marks, have to add a initial mask before calling it.
 static void kad_propagate_marks(int n, kad_node_t **a)
 {
 	int i, j;
@@ -551,50 +582,91 @@ static void kad_propagate_marks(int n, kad_node_t **a)
 	}
 }
 
+// Execute forward operation on masked nodes.
 void kad_eval_marked(int n, kad_node_t **a)
 {
 	int i;
 	kad_propagate_marks(n, a);
 	for (i = 0; i < n; ++i)
-		if (a[i]->n_child && a[i]->tmp > 0)
+		if (a[i]->n_child && a[i]->tmp > 0){
+			cout << "forwarding node :" << i << " op " << kad_op_name[a[i]->op] << endl;
 			kad_op_list[a[i]->op](a[i], KAD_FORWARD);
+			//kad_op_cmul(a[i], KAD_FORWARD, a);
+		}
 	for (i = 0; i < n; ++i) a[i]->tmp = 0;
 }
 
-const float *kad_eval_at(int n, kad_node_t **a, int from)
+// mask the 'from' node, then call kad_eval_marked.
+const SEALCiphertext *kad_eval_at(int n, kad_node_t **a, int from)
 {
 	int i;
+	if(!seal_is_encrypted(a[from])){
+		throw invalid_argument("Only evaluate ciphertext for now.");
+	}
 	if (from < 0 || from >= n) from = n - 1;
 	for (i = 0; i < n; ++i) a[i]->tmp = (i == from);
 	kad_eval_marked(n, a);
-	return a[from]->x;
+	return a[from]->x_c;
 }
 
-void kad_grad(int n, kad_node_t **a, int from)
+// BP from the 'from' node, where the initial gradient resides.
+void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 {
-	int i;
+	int i, j;
 	if (from < 0 || from >= n) from = n - 1;
-	assert(a[from]->n_d == 0);
+	assert(a[from]->n_d == 0); // the 'from' node should be a scalar node.
 	for (i = 0; i < n; ++i) a[i]->tmp = (i == from);
 	kad_propagate_marks(n, a);
-	for (i = 0; i <= from; ++i) /* set all grandients to zero */
-		if (a[i]->g && a[i]->tmp > 0)
-			memset(a[i]->g, 0, kad_len(a[i]) * sizeof(float));
-	for (i = from, a[i]->g[0] = 1.0f; i >= 0; --i) /* backprop */
-		if (a[i]->n_child && a[i]->tmp > 0)
+	for (i = 0; i <= from; ++i) /* set all grandients to zero */{
+        if (a[i]->tmp >0){ //feed doesn't have gradient.
+			if ((a[i]->g))
+				memset(a[i]->g, 0, kad_len(a[i]) * sizeof(float));
+			if ((a[i]->g_c))
+            	for(j = 0; j < kad_len(a[i]); j++) a[i]->g_c[j].clean() = true;
+        }
+    }
+	for (i = from, a[i]->g[0] = 1; i >= 0; --i) /* backprop */
+		if (a[i]->n_child && a[i]->tmp > 0){
+			cout << "back propagating :" << i << " op " << kad_op_name[a[i]->op] << endl;
 			kad_op_list[a[i]->op](a[i], KAD_BACKWARD);
+		}
+	//sum encrypted gradients
+	for (i = 0; i <= from; ++i){
+		if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
+			if (!(seal_is_encrypted(a[i]))){
+				if(remote){
+					assert(false);
+				}else{
+					for(j = 0; j < kad_len(a[i]); j++){
+						engine->decrypt(a[i]->g_c[j], *plaintext);
+						engine->decode(*plaintext, t);
+						//here is where noise should be added.
+						a[i]->g[j] = std::accumulate(t.begin(), t.end(), 0);
+					}
+				}
+			}
+			else{
+				for(j = 0; j < kad_len(a[i]); j++)
+					// maybe faster on the client side to decrypt+sum+encrypte?
+					hewrapper::sum_vector(a[i]->g_c[j]);
+			}
+		}
+	}
 	for (i = 0; i <= from; ++i) a[i]->tmp = 0;
+
 }
 
 /***********************
  * Load and save graph *
  ***********************/
 
+/**
 static void kad_save1(FILE *fp, const kad_node_t *p)
 {
 	fwrite(&p->ext_label, 4, 1, fp);
 	fwrite(&p->ext_flag, 4, 1, fp);
 	fwrite(&p->flag, 1, 1, fp);
+    fwrite(&p->grad_flag, 1, 1, fp);
 	fwrite(&p->n_child, 4, 1, fp);
 	if (p->n_child) {
 		int32_t j, pre = p->pre? p->pre->tmp : -1;
@@ -611,6 +683,7 @@ static void kad_save1(FILE *fp, const kad_node_t *p)
 	}
 }
 
+
 static kad_node_t *kad_load1(FILE *fp, kad_node_t **node)
 {
 	kad_node_t *p;
@@ -618,6 +691,7 @@ static kad_node_t *kad_load1(FILE *fp, kad_node_t **node)
 	fread(&p->ext_label, 4, 1, fp);
 	fread(&p->ext_flag, 4, 1, fp);
 	fread(&p->flag, 1, 1, fp);
+    fread(&p->grad_flag, 1, 1, fp);
 	fread(&p->n_child, 4, 1, fp);
 	if (p->n_child) {
 		int32_t j, k;
@@ -660,7 +734,7 @@ kad_node_t **kad_load(FILE *fp, int *_n_node)
 	for (i = 0; i < n_node; ++i) {
 		kad_node_t *p;
 		p = node[i] = kad_load1(fp, node);
-		if (p->n_child) {
+		if (p->n_child) {//only nodes with child have op.
 			kad_op_list[p->op](p, KAD_ALLOC);
 			kad_op_list[p->op](p, KAD_SYNC_DIM);
 		}
@@ -669,27 +743,30 @@ kad_node_t **kad_load(FILE *fp, int *_n_node)
 	kad_mark_back(n_node, node);
 	return node;
 }
+**/
+
 
 /***************
  * Graph clone *
  ***************/
-
+#if 0
 static inline kad_node_t *kad_dup1(const kad_node_t *p)
 {
 	kad_node_t *q;
 	q = (kad_node_t*)malloc(sizeof(kad_node_t));
-	memcpy(q, p, sizeof(kad_node_t));
+	std::memcpy(q, p, sizeof(kad_node_t));
 	q->pre = 0, q->tmp = 0, q->gtmp = 0;
 	if (p->ptr && p->ptr_size > 0) {
 		if (kad_use_rng(p) && !(p->flag & KAD_SHARE_RNG) && p->ptr_size == sizeof(kad_rng_t)) {
 			q->ptr = kad_rng(); /* each time step uses a different RNG */
 		} else {
 			q->ptr = malloc(p->ptr_size);
-			memcpy(q->ptr, p->ptr, p->ptr_size);
+			std::memcpy(q->ptr, p->ptr, p->ptr_size);
 		}
 	}
+    //reuse the const/init var/feed's x/g
 	if (q->n_child) {
-		q->x = q->g = 0;
+		q->x = q->g = q->x_c = q->g_c = 0
 		q->child = (kad_node_t**)calloc(q->n_child, sizeof(kad_node_t*));
 	}
 	return q;
@@ -697,7 +774,7 @@ static inline kad_node_t *kad_dup1(const kad_node_t *p)
 
 kad_node_t **kad_clone(int n, kad_node_t **v, int batch_size)
 {
-	int i, j;
+	int i, j, k;
 	kad_node_t **u;
 	u = (kad_node_t**)calloc(n, sizeof(kad_node_t*));
 	for (i = 0; i < n; ++i) v[i]->tmp = i;
@@ -709,172 +786,48 @@ kad_node_t **kad_clone(int n, kad_node_t **v, int batch_size)
 			for (j = 0; j < p->n_child; ++j)
 				q->child[j] = u[p->child[j]->tmp];
 		} else if (!kad_is_feed(p)) {
-			q->x = (float*)malloc(kad_len(p) * sizeof(float));
-			memcpy(q->x, p->x, kad_len(p) * sizeof(float));
-			q->g = 0;
+            if(seal_is_encrypted(p)){
+                q->x_c = (SEALCiphertext*)malloc(kad_len(p) * sizeof(SEALCiphertext));
+                std::memcpy(q->x_c, p->x_c, kad_len(p) * sizeof(SEALCiphertext));
+            }else{
+                q->x = (float*)malloc(kad_len(p) * sizeof(float));
+                std::memcpy(q->x, p->x, kad_len(p) * sizeof(float));
+            }
+            q->g = q->g_c = 0;
 		}
 	}
 	for (i = 0; i < n; ++i) v[i]->tmp = 0;
-	kad_sync_dim(n, u, batch_size); /* this will allocate x[] and g[] at internal nodes */
+    //init external var above, init internal var using this function.
+    kad_allocate_internal(n, v);
 	return u;
 }
-
-/**************
- * Unroll RNN *
- **************/
-
-typedef struct {
-	int32_t n, m;
-	kad_node_t **v;
-} nodes_t;
-
-static inline void push_nodes(nodes_t *w, kad_node_t *p)
-{
-	if (w->n == w->m) {
-		w->m = w->m? w->m<<1 : 16;
-		w->v = (kad_node_t**)realloc(w->v, w->m * sizeof(kad_node_t*));
-	}
-	w->v[w->n++] = p;
-}
-
-static void kad_unroll_helper(int n_v, kad_node_t **v, int i_pivot, kad_node_t **t, int len, nodes_t *w)
-{
-	int i, j, l;
-	uint8_t *flag;
-	kad_node_t **aux;
-
-	assert(kad_is_pivot(v[i_pivot]) && t[i_pivot] == 0);
-	t[i_pivot] = kad_dup1(v[i_pivot]);
-	t[i_pivot]->n_child = len;
-	t[i_pivot]->child = (kad_node_t**)realloc(t[i_pivot]->child, len * sizeof(kad_node_t*));
-
-	flag = (uint8_t*)calloc(n_v, 1);
-	for (i = i_pivot, flag[i] = 16; i >= 0; --i) {
-		if (i < i_pivot && kad_is_pivot(v[i])) continue; /* don't trespass other pivots */
-		if (flag[i]&16) /* flag 16: nodes to unroll */
-			for (j = 0; j < v[i]->n_child; ++j)
-				flag[v[i]->child[j]->tmp] = 16;
-	}
-	for (i = 0; i < i_pivot; ++i) {
-		if (!(flag[i]&16)) continue;
-		if (kad_is_var(v[i]) || kad_is_const(v[i]) || kad_is_pivot(v[i])) flag[i] |= 1; /* external nodes that should not be duplicated */
-		if (v[i]->pre) flag[v[i]->pre->tmp] |= 2;
-	}
-	flag[v[i_pivot]->child[0]->tmp] |= 4;
-	aux = (kad_node_t**)calloc(n_v, sizeof(kad_node_t*));
-	for (l = 0; l < len; ++l) {
-		for (i = 0; i < i_pivot; ++i) {
-			if (!(flag[i]&16) || ((flag[i]&3) && t[i])) continue;
-			t[i] = kad_dup1(v[i]);
-			if (v[i]->n_child)
-				for (j = 0; j < v[i]->n_child; ++j)
-					t[i]->child[j] = t[v[i]->child[j]->tmp];
-			if (flag[i]&4) t[i_pivot]->child[l] = t[i];
-			if (l == 0 && (flag[i]&2)) aux[i] = t[i];
-			if (v[i]->pre) {
-				t[v[i]->pre->tmp] = t[i];
-				if (l == len - 1) t[i]->pre = aux[v[i]->pre->tmp]; /* this forms a cycle! */
-			}
-			push_nodes(w, t[i]);
-		}
-	}
-	push_nodes(w, t[i_pivot]);
-	free(aux); free(flag);
-}
-
-int kad_n_pivots(int n_v, kad_node_t **v)
-{
-	int i, n_pivots = 0;
-	for (i = 0; i < n_v; ++i)
-		if (kad_is_pivot(v[i])) ++n_pivots;
-	return n_pivots;
-}
-
-kad_node_t **kad_unroll(int n_v, kad_node_t **v, int *new_n, int *len)
-{
-	int i, j, n_pivots = 0;
-	kad_node_t **t;
-	nodes_t w = {0,0,0};
-
-	t = (kad_node_t**)calloc(n_v, sizeof(kad_node_t*));
-	n_pivots = kad_n_pivots(n_v, v);
-	for (i = 0; i < n_v; ++i) v[i]->tmp = i;
-	if (n_pivots) {
-		int k, *i_pivots;
-		i_pivots = (int*)calloc(n_pivots, sizeof(int));
-		for (i = k = 0; i < n_v; ++i) /* collect pivots */
-			if (kad_is_pivot(v[i])) i_pivots[k++] = i;
-		for (i = 0; i < n_pivots; ++i) /* unroll each pivot, from the lowest to the highest */
-			kad_unroll_helper(n_v, v, i_pivots[i], t, len[i], &w);
-		free(i_pivots);
-	}
-	for (i = 0; i < n_v; ++i) { /* copy over the rest of nodes */
-		if (t[i]) continue;
-		t[i] = kad_dup1(v[i]);
-		if (v[i]->n_child)
-			for (j = 0; j < v[i]->n_child; ++j)
-				t[i]->child[j] = t[v[i]->child[j]->tmp];
-		push_nodes(&w, t[i]);
-	}
-	free(t);
-	for (i = 0; i < n_v; ++i) v[i]->tmp = 0;
-	for (i = 0; i < w.n; ++i) /* stack may change the output dimension */
-		if (w.v[i]->n_child > 0)
-			kad_op_list[w.v[i]->op](w.v[i], KAD_SYNC_DIM);
-	kad_allocate_internal(w.n, w.v);
-	*new_n = w.n;
-	return w.v;
-}
-
+#endif
 /********************************
  * Vector and matrix operations *
  ********************************/
 
-#ifdef __SSE__
-#include <xmmintrin.h>
+static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, SEALCiphertext *y){
+    int i;
+    SEALCiphertext s(engine);
+    s.clean() = true;
+    for (i = 0; i < n; i++) {
+        seal_multiply(x[i], y[i], *ciphertext);
+        seal_add_inplace(s, *ciphertext);
+    }
+    return s;
+}
 
-static inline float kad_sdot(int n, const float *x, const float *y) /* BLAS sdot using SSE */
-{
-	int i, n8 = n>>3<<3;
-	__m128 vs1, vs2;
-	float s, t[4];
-	vs1 = _mm_setzero_ps();
-	vs2 = _mm_setzero_ps();
-	for (i = 0; i < n8; i += 8) {
-		__m128 vx1, vx2, vy1, vy2;
-		vx1 = _mm_loadu_ps(&x[i]);
-		vx2 = _mm_loadu_ps(&x[i+4]);
-		vy1 = _mm_loadu_ps(&y[i]);
-		vy2 = _mm_loadu_ps(&y[i+4]);
-		vs1 = _mm_add_ps(vs1, _mm_mul_ps(vx1, vy1));
-		vs2 = _mm_add_ps(vs2, _mm_mul_ps(vx2, vy2));
-	}
-	for (s = 0.; i < n; ++i) s += x[i] * y[i];
-	_mm_storeu_ps(t, vs1);
-	s += t[0] + t[1] + t[2] + t[3];
-	_mm_storeu_ps(t, vs2);
-	s += t[0] + t[1] + t[2] + t[3];
-	return s;
+static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, const float *y){
+    int i;
+    SEALCiphertext s(engine);
+    s.clean() = true;
+    for (i = 0; i < n; i++) {
+        seal_multiply(x[i], y[i], *ciphertext);
+        seal_add_inplace(s, *ciphertext);
+    }
+    return s;
 }
-static inline void kad_saxpy_inlined(int n, float a, const float *x, float *y) /* BLAS saxpy using SSE */
-{
-	int i, n8 = n>>3<<3;
-	__m128 va;
-	va = _mm_set1_ps(a);
-	for (i = 0; i < n8; i += 8) {
-		__m128 vx1, vx2, vy1, vy2, vt1, vt2;
-		vx1 = _mm_loadu_ps(&x[i]);
-		vx2 = _mm_loadu_ps(&x[i+4]);
-		vy1 = _mm_loadu_ps(&y[i]);
-		vy2 = _mm_loadu_ps(&y[i+4]);
-		vt1 = _mm_add_ps(_mm_mul_ps(va, vx1), vy1);
-		vt2 = _mm_add_ps(_mm_mul_ps(va, vx2), vy2);
-		_mm_storeu_ps(&y[i], vt1);
-		_mm_storeu_ps(&y[i+4], vt2);
-	}
-	for (; i < n; ++i) y[i] += a * x[i];
-}
-#else
+
 static inline float kad_sdot(int n, const float *x, const float *y) /* BLAS sdot */
 {
 	int i;
@@ -882,12 +835,55 @@ static inline float kad_sdot(int n, const float *x, const float *y) /* BLAS sdot
 	for (i = 0; i < n; ++i) s += x[i] * y[i];
 	return s;
 }
+
+
+static inline void kad_saxpy_inlined(int n, SEALCiphertext a, SEALCiphertext *x, SEALCiphertext *y){
+    int i;
+    for (i = 0; i < n; ++i){
+        seal_multiply(x[i], a, *ciphertext);
+        seal_add_inplace(y[i], *ciphertext);
+    }
+}
+
+static inline void kad_saxpy_inlined(int n, float a, SEALCiphertext *x, SEALCiphertext *y){
+    int i;
+    for (i = 0; i <n; ++i){
+        seal_multiply(x[i], a, *ciphertext);
+        seal_add_inplace(y[i], *ciphertext);
+    }
+}
+
+static inline void kad_saxpy_inlined(int n, float a, const float *x, SEALCiphertext *y){
+    int i;
+    for (i = 0; i <n; ++i){
+        seal_add_inplace(y[i], (x[i]*a));
+    }
+}
+
+
+static inline void kad_saxpy_inlined(int n, SEALCiphertext a, const float *x, SEALCiphertext *y){
+    int i;
+    for (i = 0; i < n; ++i){
+        seal_multiply(a, x[i], *ciphertext);
+        seal_add_inplace(y[i], *ciphertext);
+    }
+}
+
 static inline void kad_saxpy_inlined(int n, float a, const float *x, float *y) // BLAS saxpy
 {
 	int i;
 	for (i = 0; i < n; ++i) y[i] += a * x[i];
 }
-#endif
+
+template<typename T>
+void kad_vec_mul_sum(int n, SEALCiphertext *a, SEALCiphertext *b, T *c){
+	static_assert(std::is_same<T, SEALCiphertext>::value || std::is_same<T, SEALPlaintext>::value || std::is_same<T, float>::value,"Bad T");
+    int i;
+    for (i = 0; i < n; ++i){
+        seal_multiply(b[i], c[i], *ciphertext);
+        seal_add_inplace(a[i], *ciphertext);
+    }
+}
 
 void kad_vec_mul_sum(int n, float *a, const float *b, const float *c)
 {
@@ -895,18 +891,15 @@ void kad_vec_mul_sum(int n, float *a, const float *b, const float *c)
 	for (i = 0; i < n; ++i) a[i] += b[i] * c[i];
 }
 
-void kad_saxpy(int n, float a, const float *x, float *y) { kad_saxpy_inlined(n, a, x, y); }
-
-#ifdef HAVE_CBLAS
-#include <cblas.h>
-void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, const float *A, const float *B, float *C)
-{
-	cblas_sgemm(CblasRowMajor, trans_A? CblasTrans : CblasNoTrans, trans_B? CblasTrans : CblasNoTrans, M, N, K, 1.0f, A, trans_A? M : K, B, trans_B? K : N, 1.0f, C, N);
+template<typename A, typename B, typename C>
+void kad_saxpy(int n, B a, A *x, C *y){
+    kad_saxpy_inlined(n, a, x, y);
 }
-#else
-void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, const float *A, const float *B, float *C) /* simplified BLAS sgemm */
-{
-	static const int x = 16;
+
+
+template<typename T> 
+void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, SEALCiphertext *A, T *B, SEALCiphertext *C){
+    static const int x = 16;
 	int i, j, k;
 	if (!trans_A && trans_B) {
 		for (i = 0; i < M; i += x)
@@ -914,23 +907,25 @@ void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, const float
 				int ii, ie = M < i + x? M : i + x;
 				int jj, je = N < j + x? N : j + x;
 				for (ii = i; ii < ie; ++ii) { /* loop tiling */
-					const float *aii = A + ii * K, *bjj;
-					float *cii = C + ii * N;
-					for (jj = j, bjj = B + j * K; jj < je; ++jj, bjj += K)
-						cii[jj] += kad_sdot(K, aii, bjj);
+					SEALCiphertext *aii = A + ii * K;
+                    T  *bjj;
+					SEALCiphertext *cii = C + ii * N;
+					for (jj = j, bjj = B + j * K; jj < je; ++jj, bjj += K){
+                        *ciphertext = kad_sdot(K, aii, bjj);
+						seal_add_inplace(cii[jj], *ciphertext);
+                    }
 				}
 			}
 	} else if (!trans_A && !trans_B) {
 		for (i = 0; i < M; ++i)
 			for (k = 0; k < K; ++k)
-				kad_saxpy_inlined(N, A[i*K+k], &B[k*N], &C[i*N]);
+				kad_saxpy_inlined(N, A[i*K+k], &B[k*N], &C[i*N]); 
 	} else if (trans_A && !trans_B) {
 		for (k = 0; k < K; ++k)
 			for (i = 0; i < M; ++i)
 				kad_saxpy_inlined(N, A[k*M+i], &B[k*N], &C[i*N]);
 	} else abort(); /* not implemented for (trans_A && trans_B) */
 }
-#endif
 
 /***************************
  * Random number generator *
@@ -1024,7 +1019,7 @@ double kad_drand_normal(void *d)
 static inline void kad_copy_dim1(kad_node_t *dst, const kad_node_t *src) /* set the dimension/shape of dst to src */
 {
 	dst->n_d = src->n_d;
-	if (src->n_d) memcpy(dst->d, src->d, src->n_d * sizeof(int));
+	if (src->n_d) std::memcpy(dst->d, src->d, src->n_d * sizeof(int));
 }
 
 /********** Arithmetic operations **********/
@@ -1033,7 +1028,6 @@ int kad_op_add(kad_node_t *p, int action)
 {
 	int i, n0, n1;
 	kad_node_t *q[2];
-
 	q[0] = p->child[0], n0 = kad_len(q[0]);
 	q[1] = p->child[1], n1 = kad_len(q[1]);
 	if (action == KAD_SYNC_DIM) {
@@ -1041,15 +1035,21 @@ int kad_op_add(kad_node_t *p, int action)
 		kad_copy_dim1(p, q[0]);
 	} else if (action == KAD_FORWARD) {
 		assert(n0 >= n1);
-		memcpy(p->x, q[0]->x, n0 * sizeof(float));
-		for (i = 0; i < n0; i += n1)
-			kad_saxpy(n1, 1.0f, q[1]->x, p->x + i);
+		for (i = 0; i < n0; i++)
+			p->x_c[i] = q[0]->x_c[i];
+        if (seal_is_encrypted(q[1]))
+            for (i = 0; i < n0; i += n1)
+                kad_saxpy(n1, 1.0f, q[1]->x_c, p->x_c + i);
+        else
+            for (i = 0; i < n0; i += n1)
+                kad_saxpy(n1, 1.0f, q[1]->x, p->x_c + i);
 	} else if (action == KAD_BACKWARD) {
-		if (kad_is_back(q[0])) kad_saxpy(n0, 1.0f, p->g, q[0]->g);
-		if (kad_is_back(q[1]))
-			for (i = 0; i < n0; i += n1)
-				kad_saxpy(n1, 1.0f, p->g + i, q[1]->g);
-	}
+        if (kad_is_back(q[0]))
+            kad_saxpy(n0, 1.0f, p->g_c, q[0]->g_c);
+        if (kad_is_back(q[1]))
+            for (i = 0; i < n0; i += n1)
+                kad_saxpy(n1, 1.0f, p->g_c + i, q[1]->g_c);
+    }
 	return 0;
 }
 
@@ -1065,21 +1065,26 @@ int kad_op_sub(kad_node_t *p, int action)
 		kad_copy_dim1(p, q[0]);
 	} else if (action == KAD_FORWARD) {
 		assert(n0 >= n1);
-		memcpy(p->x, q[0]->x, n0 * sizeof(float));
-		for (i = 0; i < n0; i += n1)
-			kad_saxpy(n1, -1.0f, q[1]->x, p->x + i);
+		for (i = 0; i < n0; i++)
+			p->x_c[i] = q[0]->x_c[i];
+        if (seal_is_encrypted(q[1]))
+            for (i = 0; i < n0; i += n1)
+                kad_saxpy(n1, -1.0f, q[1]->x_c, p->x_c + i);
+        else
+            for (i = 0; i < n0; i += n1)
+                kad_saxpy(n1, -1.0f, q[1]->x, p->x + i);
 	} else if (action == KAD_BACKWARD) {
-		if (kad_is_back(q[0])) kad_saxpy(n0, 1.0f, p->g, q[0]->g);
+		if (kad_is_back(q[0])) kad_saxpy(n0, 1.0f, p->g_c, q[0]->g_c);
 		if (kad_is_back(q[1]))
 			for (i = 0; i < n0; i += n1)
-				kad_saxpy(n1, -1.0f, p->g + i, q[1]->g);
+				kad_saxpy(n1, -1.0f, p->g_c + i, q[1]->g_c);
 	}
 	return 0;
 }
 
 int kad_op_mul(kad_node_t *p, int action)
 {
-	int i, n0, n1;
+	int i, j, n0, n1;
 	kad_node_t *q[2];
 
 	q[0] = p->child[0], n0 = kad_len(q[0]);
@@ -1089,24 +1094,36 @@ int kad_op_mul(kad_node_t *p, int action)
 		kad_copy_dim1(p, q[0]);
 	} else if (action == KAD_FORWARD) {
 		assert(n0 >= n1);
-		memset(p->x, 0, n0 * sizeof(float));
-		if (q[0]->x != 0 && q[1]->x != 0)
-			for (i = 0; i < n0; i += n1) /* TODO: optimize when n1==1 */
-				kad_vec_mul_sum(n1, p->x + i, q[0]->x + i, q[1]->x);
+        for(j = 0; j < kad_len(p); j++)
+            p->x_c[j].clean() = true;
+        if (seal_is_encrypted(q[1]))
+            for (i = 0; i < n0; i += n1) /* TODO: optimize when n1==1 */
+                kad_vec_mul_sum(n1, p->x_c + i, q[0]->x_c + i, q[1]->x_c);
+        else
+            for (i = 0; i < n0; i += n1) /* TODO: optimize when n1==1 */
+                kad_vec_mul_sum(n1, p->x_c + i, q[0]->x_c + i, q[1]->x);
+		//if (q[0]->x != 0 && q[1]->x != 0) //why it's possible? comment it for now.
 	} else if (action == KAD_BACKWARD) {
-		if (kad_is_back(q[0]) && q[1]->x)
+		if (kad_is_back(q[0]))
+            if (seal_is_encrypted(q[1]))
+                for (i = 0; i < n0; i += n1)
+                    kad_vec_mul_sum(n1, q[0]->g_c + i, p->g_c + i, q[1]->x_c);
+            else
+                for (i = 0; i < n0; i += n1)
+                    kad_vec_mul_sum(n1, q[0]->g_c + i, p->g_c + i, q[1]->x);
+		if (kad_is_back(q[1]))
 			for (i = 0; i < n0; i += n1)
-				kad_vec_mul_sum(n1, q[0]->g + i, p->g + i, q[1]->x);
-		if (kad_is_back(q[1]) && q[0]->x)
-			for (i = 0; i < n0; i += n1)
-				kad_vec_mul_sum(n1, q[1]->g, p->g + i, q[0]->x + i);
+				kad_vec_mul_sum(n1, q[1]->g_c, p->g_c + i, q[0]->x_c + i);
 	}
 	return 0;
 }
 
+
+// column (last dimension) inner product.
 int kad_op_cmul(kad_node_t *p, int action)
 {
 	int i, n_a_row, n_b_row, n_col, n_a_col = 1, n_b_col = 1;
+    int j;
 	kad_node_t *q[2];
 
 	q[0] = p->child[0], q[1] = p->child[1];
@@ -1118,14 +1135,21 @@ int kad_op_cmul(kad_node_t *p, int action)
 		if (n_a_col != n_b_col) return -1;
 		p->n_d = 2, p->d[0] = n_a_row, p->d[1] = n_b_row;
 	} else if (action == KAD_FORWARD) {
-		memset(p->x, 0, n_a_row * n_b_row * sizeof(float));
-		if (q[0]->x && q[1]->x)
-			kad_sgemm_simple(0, 1, n_a_row, n_b_row, n_col, q[0]->x, q[1]->x, p->x); /* Y = X * trans(W) */
+		//memset(p->x, 0, n_a_row * n_b_row * sizeof(float));
+        for (j = 0; j < n_a_row * n_b_row; j++)
+            p->x_c[j].clean() = true;
+        if (seal_is_encrypted(q[1]))
+			kad_sgemm_simple(0, 1, n_a_row, n_b_row, n_col, q[0]->x_c, q[1]->x_c, p->x_c); /* Y = X * trans(W) */
+        else
+			kad_sgemm_simple(0, 1, n_a_row, n_b_row, n_col, q[0]->x_c, q[1]->x, p->x_c); /* Y = X * trans(W) */
 	} else if (action == KAD_BACKWARD) {
-		if (kad_is_back(q[0]) && q[1]->x)
-			kad_sgemm_simple(0, 0, n_a_row, n_col, n_b_row, p->g, q[1]->x, q[0]->g); /* G_x <- G_y * W */
-		if (kad_is_back(q[1]) && q[0]->x)
-			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g, q[0]->x, q[1]->g); /* G_w <- trans(G_y) * X */
+		if (kad_is_back(q[0]) && (q[1]->x))
+			kad_sgemm_simple(0, 0, n_a_row, n_col, n_b_row, p->g_c, q[1]->x, q[0]->g_c); /* G_x <- G_y * W */
+        else if (kad_is_back(q[0]) && seal_is_encrypted(q[1]))
+			kad_sgemm_simple(0, 0, n_a_row, n_col, n_b_row, p->g_c, q[1]->x_c, q[0]->g_c); /* G_x <- G_y * W */
+		if (kad_is_back(q[1]) && q[0]->x_c)
+			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c); /* G_w <- trans(G_y) * X */
+
 	}
 	return 0;
 }
@@ -1133,6 +1157,7 @@ int kad_op_cmul(kad_node_t *p, int action)
 int kad_op_matmul(kad_node_t *p, int action) /* TODO: matmul and cmul have different broadcasting rules */
 {
 	int n_a_row, n_b_row, n_a_col, n_b_col;
+    int j;
 	kad_node_t *q[2];
 
 	q[0] = p->child[0];
@@ -1145,14 +1170,21 @@ int kad_op_matmul(kad_node_t *p, int action) /* TODO: matmul and cmul have diffe
 		if (n_a_col != n_b_row) return -1;
 		p->n_d = 2, p->d[0] = n_a_row, p->d[1] = n_b_col;
 	} else if (action == KAD_FORWARD) {
-		memset(p->x, 0, n_a_row * n_b_col * sizeof(float));
-		if (q[0]->x && q[1]->x)
-			kad_sgemm_simple(0, 0, n_a_row, n_b_col, n_a_col, q[0]->x, q[1]->x, p->x); /* Y = X * W */
+		//memset(p->x, 0, n_a_row * n_b_col * sizeof(float));
+        for (j = 0; j < n_a_row * n_b_col; j++)
+            p->x_c[j].clean() = true;
+        if (seal_is_encrypted(q[1]))
+			kad_sgemm_simple(0, 0, n_a_row, n_b_col, n_a_col, q[0]->x_c, q[1]->x_c, p->x_c); /* Y = X * W */
+        else
+			kad_sgemm_simple(0, 0, n_a_row, n_b_col, n_a_col, q[0]->x_c, q[1]->x, p->x_c); /* Y = X * W */
 	} else if (action == KAD_BACKWARD) {
 		if (kad_is_back(q[0]) && q[1]->x)
-			kad_sgemm_simple(0, 1, n_a_row, n_a_col, n_b_col, p->g, q[1]->x, q[0]->g); /* G_x <- G_y * trans(W) */
-		if (kad_is_back(q[1]) && q[0]->x)
-			kad_sgemm_simple(1, 0, n_b_row, n_b_col, n_a_row, q[0]->x, p->g, q[1]->g); /* G_y <- trans(A) * G_y */
+			kad_sgemm_simple(0, 1, n_a_row, n_a_col, n_b_col, p->g_c, q[1]->x, q[0]->g_c); /* G_x <- G_y * trans(W) */
+        else if (kad_is_back(q[0]) && seal_is_encrypted(q[1]))
+			kad_sgemm_simple(0, 1, n_a_row, n_a_col, n_b_col, p->g_c, q[1]->x_c, q[0]->g_c); /* G_x <- G_y * trans(W) */
+        //dont really see the diff between x_c existing and is_encrypted being true.
+		if (kad_is_back(q[1]) && q[0]->x_c)
+			kad_sgemm_simple(1, 0, n_b_row, n_b_col, n_a_row, q[0]->x_c, p->g_c, q[1]->g_c); /* G_y <- trans(A) * G_y */
 	}
 	return 0;
 }
@@ -1166,10 +1198,13 @@ int kad_op_square(kad_node_t *p, int action)
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
 		for (i = 0; i < n; ++i)
-			p->x[i] = q->x[i] * q->x[i];
+            seal_multiply(q->x_c[i], q->x_c[i], p->x_c[i]);
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			q->g[i] += p->g[i] * (q->x[i] + q->x[i]);
+		for (i = 0; i < n; ++i){
+            seal_add(q->x_c[i], q->x_c[i], *ciphertext);
+            seal_multiply_inplace(*ciphertext, p->g_c[i]);
+            seal_add_inplace(q->g_c[i], *ciphertext);
+        }
 	}
 	return 0;
 }
@@ -1182,45 +1217,93 @@ int kad_op_1minus(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i) p->x[i] = 1.0f - q->x[i];
+		for (i = 0; i < n; ++i){
+            engine->get_evaluator()->negate(q->x_c[i].ciphertext(), ciphertext->ciphertext());
+            seal_add(*ciphertext, 1.0, p->x_c[i]);
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		kad_saxpy(n, -1.0f, p->g, q->g);
+		kad_saxpy(n, -1.0f, p->g_c, q->g_c);
 	}
 	return 0;
 }
 
 int kad_op_exp(kad_node_t *p, int action)
 {
-	int i, n;
+	int i, j, n;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i) p->x[i] = expf(q->x[i]);
+        if(remote)
+        {
+            //not implemented
+            assert(false);
+        }else{
+            for (i = 0; i < n; ++i) {
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); j++)
+                    t[i] = expf(t[i]);
+                engine->encode(t, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			q->g[i] += p->g[i] * p->x[i];
+		for (i = 0; i < n; ++i){
+                seal_multiply(p->g_c[i], p->x_c[i], *ciphertext);
+                seal_add_inplace(q->g_c[i], *ciphertext);
+        }
 	}
 	return 0;
 }
 
 int kad_op_log(kad_node_t *p, int action)
 {
-	int i, n;
+	int i, j, n;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i) p->x[i] = logf(q->x[i]);
+        if(remote)
+        {
+            //not implemented
+            assert(false);
+        }else{
+            for (i = 0; i < n; ++i) {
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); j++)
+                    t[i] = logf(t[i]);
+                engine->encode(t, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			q->g[i] += p->g[i] / q->x[i];
+		// input must be encrypted.
+		assert(seal_is_encrypted(q));
+		if(remote){
+			//not implemented
+			assert(false);
+		}else{
+			for (i = 0; i < n; ++i) {
+				engine->decrypt(q->x_c[i], *plaintext);
+				engine->decode(*plaintext, t);
+				for (j = 0; j < t.size(); j++)
+					t[i] = 1.0/t[i];
+				engine->encode(t, *plaintext);
+				engine->encrypt(*plaintext, *ciphertext);
+				seal_multiply_inplace(*ciphertext, p->g_c[i]);
+				seal_add_inplace(q->g_c[i], *ciphertext);
+			}
+		}
 	}
 	return 0;
 }
 
+
+// sum on the (p->ptr) axis.
 int kad_op_reduce_sum(kad_node_t *p, int action)
 {
 	kad_node_t *q = p->child[0];
@@ -1236,16 +1319,17 @@ int kad_op_reduce_sum(kad_node_t *p, int action)
 		for (i = j = 0; i < q->n_d; ++i)
 			if (i != axis) p->d[j++] = q->d[i];
 	} else if (action == KAD_FORWARD) {
-		memset(p->x, 0, kad_len(p) * sizeof(float));
+        for (i = 0; i < kad_len(p); ++i)
+            p->x_c[i].clean() = true;
 		for (i = 0; i < d0; ++i)
 			for (j = 0; j < q->d[axis]; ++j)
 				for (k = 0; k < d1; ++k)
-					p->x[i * d1 + k] += q->x[(i * q->d[axis] + j) * d1 + k];
+                    seal_add_inplace(p->x_c[i * d1 + k], q->x_c[(i * q->d[axis] + j) * d1 + k]);
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
 		for (i = 0; i < d0; ++i)
 			for (j = 0; j < q->d[axis]; ++j)
 				for (k = 0; k < d1; ++k)
-					q->g[(i * q->d[axis] + j) * d1 + k] += p->g[i * d1 + k];
+					seal_add_inplace(q->g_c[(i * q->d[axis] + j) * d1 + k], p->g_c[i * d1 + k]);;
 	}
 	return 0;
 }
@@ -1265,18 +1349,24 @@ int kad_op_reduce_mean(kad_node_t *p, int action)
 		for (i = j = 0; i < q->n_d; ++i)
 			if (i != axis) p->d[j++] = q->d[i];
 	} else if (action == KAD_FORWARD) {
-		float t = 1.0f / q->d[axis];
-		memset(p->x, 0, kad_len(p) * sizeof(float));
+		float coeff = 1.0f / q->d[axis];
+        for (i = 0; i < kad_len(p); ++i)
+            p->x_c[i].clean() = true;
 		for (i = 0; i < d0; ++i)
 			for (j = 0; j < q->d[axis]; ++j)
-				for (k = 0; k < d1; ++k)
-					p->x[i * d1 + k] += t * q->x[(i * q->d[axis] + j) * d1 + k];
+				for (k = 0; k < d1; ++k){
+                    seal_add_inplace(p->x_c[i*d1+k], q->x_c[(i*q->d[axis]+j)*d1+k]);
+                }
+		for (i = 0; i < kad_len(p); ++i)
+			seal_multiply_inplace(p->x_c[i], coeff);
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
 		float t = 1.0f / q->d[axis];
 		for (i = 0; i < d0; ++i)
 			for (j = 0; j < q->d[axis]; ++j)
-				for (k = 0; k < d1; ++k)
-					q->g[(i * q->d[axis] + j) * d1 + k] += t * p->g[i * d1 + k];
+				for (k = 0; k < d1; ++k){
+                    seal_multiply(p->g_c[i*d1 + k], t, *ciphertext);
+                    seal_add_inplace(q->g_c[(i*q->d[axis] + j) * d1 + k], *ciphertext);
+                }
 	}
 	return 0;
 }
@@ -1299,20 +1389,28 @@ int kad_op_dropout(kad_node_t *p, int action)
 		uint8_t *flag = (uint8_t*)p->gtmp;
 		for (i = 0; i < n; ++i) {
 			int kept = (kad_drand(p->ptr) >= r);
-			p->x[i] = kept? q->x[i] * z : 0.0f;
+            if (kept)
+                seal_multiply(q->x_c[i], z, p->x_c[i]);
+            else
+                p->x_c[i].clean() = true;
 			if (flag) flag[i] = kept;
 		}
 	} else if (action == KAD_BACKWARD && kad_is_back(p->child[0])) {
 		float r = kad_is_const(q) || kad_is_var(q)? 0.0f : *p->child[1]->x, z = 1.0f / (1.0f - r);
 		uint8_t *flag = (uint8_t*)p->gtmp;
 		for (i = 0; i < n; ++i)
-			if (flag[i]) q->g[i] += z * p->g[i];
+			if (flag[i]) {
+                seal_multiply(p->g_c[i], z, *ciphertext);
+                seal_add_inplace(q->g_c[i], *ciphertext);
+            }
 	}
 	return 0;
 }
 
+
 int kad_op_sample_normal(kad_node_t *p, int action) /* not tested */
-{
+{assert(false);
+	/***
 	int i, n;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
@@ -1335,10 +1433,14 @@ int kad_op_sample_normal(kad_node_t *p, int action) /* not tested */
 			q->g[i] += p->g[i] * r[i];
 	}
 	return 0;
+	***/
 }
 
+
+
 int kad_op_slice(kad_node_t *p, int action)
-{
+{assert(false);
+	/***
 	kad_node_t *q = p->child[0];
 	int32_t *aux, *range;
 	int i, axis, d0, d1;
@@ -1354,16 +1456,18 @@ int kad_op_slice(kad_node_t *p, int action)
 		p->d[axis] = range[1] - range[0];
 	} else if (action == KAD_FORWARD) {
 		for (i = 0; i < d0; ++i)
-			memcpy(&p->x[i * p->d[axis] * d1], &q->x[(i * q->d[axis] + range[0]) * d1], (range[1] - range[0]) * d1 * sizeof(float));
+			std::memcpy(&p->x_c[i * p->d[axis] * d1], &q->x_c[(i * q->d[axis] + range[0]) * d1], (range[1] - range[0]) * d1 * sizeof(SEALCiphertext));
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
 		for (i = 0; i < d0; ++i)
-			kad_saxpy((range[1] - range[0]) * d1, 1.0f, &p->g[i * p->d[axis] * d1], &q->g[(i * q->d[axis] + range[0]) * d1]);
+			kad_saxpy((range[1] - range[0]) * d1, 1.0f, &p->g_c[i * p->d[axis] * d1], &q->g_c[(i * q->d[axis] + range[0]) * d1]);
 	}
+	***/
 	return 0;
 }
 
 int kad_op_concat(kad_node_t *p, int action)
-{
+{assert(false);
+	/***
 	kad_node_t *q = p->child[0];
 	int32_t *aux;
 	int i, j, k, axis, d0, d1;
@@ -1385,7 +1489,7 @@ int kad_op_concat(kad_node_t *p, int action)
 		for (i = 0; i < d0; ++i)
 			for (j = k = 0; j < p->n_child; ++j) {
 				q = p->child[j];
-				memcpy(&p->x[(i * p->d[axis] + k) * d1], &q->x[i * q->d[axis] * d1], q->d[axis] * d1 * sizeof(float));
+				std::memcpy(&p->x_c[(i * p->d[axis] + k) * d1], &q->x_c[i * q->d[axis] * d1], q->d[axis] * d1 * sizeof(SEALCiphertext));
 				k += q->d[axis];
 			}
 	} else if (action == KAD_BACKWARD) {
@@ -1393,15 +1497,17 @@ int kad_op_concat(kad_node_t *p, int action)
 			for (j = k = 0; j < p->n_child; ++j) {
 				q = p->child[j];
 				if (!kad_is_back(q)) continue;
-				kad_saxpy(q->d[axis] * d1, 1.0f, &p->g[(i * p->d[axis] + k) * d1], &q->g[i * q->d[axis] * d1]);
+				kad_saxpy(q->d[axis] * d1, 1.0f, &p->g_c[(i * p->d[axis] + k) * d1], &q->g_c[i * q->d[axis] * d1]);
 				k += q->d[axis];
 			}
 	}
+	***/
 	return 0;
 }
 
 int kad_op_reshape(kad_node_t *p, int action)
-{
+{assert(false);
+	/***
 	kad_node_t *q = p->child[0];
 
 	if (action == KAD_SYNC_DIM) {
@@ -1414,7 +1520,7 @@ int kad_op_reshape(kad_node_t *p, int action)
 				if (p->d[i] <= 0) ++n_missing;
 				else len *= p->d[i];
 			if (n_missing == 0 && len != kad_len(q)) return -1;
-			if (n_missing > 1) { /* attempt to infer missing dimensions except the last one */
+			if (n_missing > 1) {  //attempt to infer missing dimensions except the last one 
 				for (i = 0; i < p->n_d; ++i)
 					if (p->d[i] <= 0 && i < q->n_d) {
 						p->d[i] = q->d[i], len *= p->d[i];
@@ -1422,22 +1528,24 @@ int kad_op_reshape(kad_node_t *p, int action)
 					}
 				if (n_missing > 1) return -1;
 			}
-			if (n_missing == 1) { /* infer the last missing dimension */
+			if (n_missing == 1) { //infer the last missing dimension 
 				if (kad_len(q) % len != 0) return -1;
 				for (i = 0; i < p->n_d; ++i)
 					if (p->d[i] <= 0) p->d[i] = kad_len(q) / len;
 			}
 		} else kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		memcpy(p->x, q->x, kad_len(p) * sizeof(float));
+		std::memcpy(p->x_c, q->x_c, kad_len(p) * sizeof(SEALCiphertext));
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		kad_saxpy(kad_len(p), 1.0f, p->g, q->g);
+		kad_saxpy(kad_len(p), 1.0f, p->g_c, q->g_c);
 	}
+	***/
 	return 0;
 }
 
 int kad_op_reverse(kad_node_t *p, int action)
 {
+	/***
 	kad_node_t *q = p->child[0];
 	int axis, i, j, n, d0, d1;
 
@@ -1452,36 +1560,58 @@ int kad_op_reverse(kad_node_t *p, int action)
 	} else if (action == KAD_FORWARD) {
 		for (i = 0; i < d0; ++i)
 			for (j = 0; j < n; ++j)
-				memcpy(&p->x[(i * n + n - 1 - j) * d1], &q->x[(i * n + j) * d1], d1 * sizeof(float));
+				std::memcpy(&p->x_c[(i * n + n - 1 - j) * d1], &q->x_c[(i * n + j) * d1], d1 * sizeof(SEALCiphertext));
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
 		for (i = 0; i < d0; ++i)
 			for (j = 0; j < n; ++j)
-				kad_saxpy(d1, 1.0f, &p->g[(i * n + n - 1 - j) * d1], &q->g[(i * n + j) * d1]);
+				kad_saxpy(d1, 1.0f, &p->g_c[(i * n + n - 1 - j) * d1], &q->g_c[(i * n + j) * d1]);
 	}
+	***/
 	return 0;
+
 }
 
 /********** Cost functions **********/
+
+
+// better transfer all cost functions to bootstrapping functions.
 
 int kad_op_mse(kad_node_t *p, int action)
 {
 	kad_node_t *y1 = p->child[0]; /* test */
 	kad_node_t *y0 = p->child[1]; /* truth */
 	int i, n;
-
-	n = kad_len(y0);
 	if (action == KAD_SYNC_DIM) {
-		if (n != kad_len(y1)) return -1;
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
-		double cost = 0.0;
-		for (i = 0; i < n; ++i)
-			cost += (y1->x[i] - y0->x[i]) * (y1->x[i] - y0->x[i]);
-		p->x[0] = (float)(cost / n);
+        if (remote){
+            //NOT IMPLEMENTED
+            assert(false);
+        }else{
+            engine->decrypt(y1->x_c[0], *plaintext);
+            engine->decode(*plaintext, test_t);
+            engine->decrypt(y0->x_c[0], *plaintext);
+            engine->decode(*plaintext, truth_t);
+            for (i=0; i< truth_t.size(); i++)
+                test_t[i] = pow((truth_t[i] - test_t[i]), 2.0) * 1./float(y0->x_c[0].size());
+            engine->encode(test_t, *plaintext);
+            engine->encrypt(*plaintext, p->x_c[0]);
+		}
 	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
-		float t = 2.0f * p->g[0] / n;
-		for (i = 0; i < n; ++i)
-			y1->g[i] += t * (y1->x[i] - y0->x[i]);
+        if (remote){
+            //NOT IMPLEMENTED
+            assert(false);
+        }else{
+			float coeff = 2.0f * p->g[0]/float(y0->x_c[0].size());
+            engine->decrypt(y1->x_c[0], *plaintext);
+            engine->decode(*plaintext, test_t);
+            engine->decrypt(y0->x_c[0], *plaintext);
+            engine->decode(*plaintext, truth_t);
+            for (i=0; i < truth_t.size(); i++)
+                test_t[i] = coeff * (test_t[i] - truth_t[i]);
+            engine->encode(test_t, *plaintext);
+            seal_add_inplace(y1->g_c[0], *plaintext);
+		}
 	}
 	return 0;
 }
@@ -1492,61 +1622,44 @@ int kad_op_ce_bin(kad_node_t *p, int action)
 	kad_node_t *y1 = p->child[0]; /* test */
 	kad_node_t *y0 = p->child[1]; /* truth */
 	int i, n;
-
-	n = kad_len(y0);
 	if (action == KAD_SYNC_DIM) {
-		if (n != kad_len(y1)) return -1;
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
-		double cost = 0.0;
-		for (i = 0; i < n; ++i) {
-			if (y0->x[i] > 0.0f)
-				cost += y0->x[i] * log(y0->x[i] / (y1->x[i] > tiny? y1->x[i] : tiny));
-			if (1.0f - y0->x[i] > 0.0f)
-				cost += (1.0f - y0->x[i]) * log((1.0f - y0->x[i]) / (1.0f - y1->x[i] > tiny? 1.0f - y1->x[i] : tiny));
-		}
-		p->x[0] = (float)(cost / n);
+        if (remote){
+            //NOT IMPLEMENTED
+            assert(false);
+        }else{
+            engine->decrypt(y1->x_c[0], *plaintext);
+            engine->decode(*plaintext, test_t);
+            engine->decrypt(y0->x_c[0], *plaintext);
+            engine->decode(*plaintext, truth_t);
+            for (i=0; i<truth_t.size(); i++)
+                test_t[i] = (-log(test_t[i])*truth_t[i] + (truth_t[i]-1)*log(1.-test_t[i]))/(float)(truth_t.size());
+            engine->encode(test_t, *plaintext);
+            engine->encrypt(*plaintext, p->x_c[0]);
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
-		float t = p->g[0] / n;
-		for (i = 0; i < n; ++i) {
-			if (y0->x[i] > 0.0f)
-				y1->g[i] -= t * y0->x[i] / (y1->x[i] > tiny? y1->x[i] : tiny);
-			if (1.0f - y0->x[i] > 0.0f)
-				y1->g[i] += t * (1.0f - y0->x[i]) / (1.0f - y1->x[i] > tiny? 1.0f - y1->x[i] : tiny);
-		}
+        if (remote){
+            //NOT IMPLEMENTED
+            assert(false);
+        }else{
+            engine->decrypt(y1->x_c[0], *plaintext);
+            engine->decode(*plaintext, test_t);
+            engine->decrypt(y0->x_c[0], *plaintext);
+            engine->decode(*plaintext, truth_t);
+            for (i=0; i<truth_t.size(); i++)
+                test_t[i] = p->g[0]*(-1./test_t[i]*truth_t[i] + (1-truth_t[i])*1./(1.-test_t[i]))/(float)(truth_t.size());
+            engine->encode(test_t, *plaintext);
+            seal_add_inplace(y1->g_c[0], *plaintext);
+        }
 	}
 	return 0;
 }
 
-int kad_op_ce_bin_neg(kad_node_t *p, int action)
+int kad_op_ce_bin_neg(kad_node_t *p, int action)//use 1/-1 as labels
 {
-	static const float tiny = 1e-9f;
-	kad_node_t *y1 = p->child[0]; /* test */
-	kad_node_t *y0 = p->child[1]; /* truth */
-	int i, n;
-
-	n = kad_len(y0);
-	if (action == KAD_SYNC_DIM) {
-		if (n != kad_len(y1)) return -1;
-		p->n_d = 0;
-	} else if (action == KAD_FORWARD) {
-		double cost = 0.0;
-		for (i = 0; i < n; ++i) {
-			if (1.0f + y0->x[i] > 0.0f)
-				cost += .5f * (1.0f + y0->x[i]) * log((1.0f + y0->x[i]) / (1.0f + y1->x[i] > tiny? 1.0f + y1->x[i] : tiny));
-			if (1.0f - y0->x[i] > 0.0f)
-				cost += .5f * (1.0f - y0->x[i]) * log((1.0f - y0->x[i]) / (1.0f - y1->x[i] > tiny? 1.0f - y1->x[i] : tiny));
-		}
-		p->x[0] = (float)(cost / n);
-	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
-		float t = p->g[0] / n;
-		for (i = 0; i < n; ++i) {
-			if (1.0f + y0->x[i] > 0.0f)
-				y1->g[i] -= .5f * t * (1.0f + y0->x[i]) / (1.0f + y1->x[i] > tiny? 1.0f + y1->x[i] : tiny);
-			if (1.0f - y0->x[i] > 0.0f)
-				y1->g[i] += .5f * t * (1.0f - y0->x[i]) / (1.0f - y1->x[i] > tiny? 1.0f - y1->x[i] : tiny);
-		}
-	}
+    //not implemented, because don't know its meaning.
+    assert(false);
 	return 0;
 }
 
@@ -1557,9 +1670,10 @@ int kad_op_ce_multi(kad_node_t *p, int action)
 	kad_node_t *y0 = p->child[1]; /* truth */
 	kad_node_t *c = 0;
 	int i, j, n1, d0;
-
+	int batch_size = y1->x_c[0].size();
 	n1 = y0->d[y0->n_d - 1];
-	d0 = kad_len(y0) / n1;
+	//d0 = kad_len(y0) / n1;
+    // this third child is for masking.
 	if (p->n_child == 3) {
 		c = p->child[2];
 		assert(c->n_d == 1 && c->d[0] == n1);
@@ -1568,46 +1682,73 @@ int kad_op_ce_multi(kad_node_t *p, int action)
 		if (kad_len(y0) != kad_len(y1) || y0->d[y0->n_d - 1] != y1->d[y1->n_d - 1]) return -1;
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
-		double cost = 0.0;
-		if (c == 0) {
-			for (j = 0; j < d0; ++j) {
-				float *x1 = &y1->x[j * n1], *x0 = &y0->x[j * n1];
-				for (i = 0; i < n1; ++i)
-					if (x0[i] > 0.0f)
-						cost += x0[i] * log(x0[i] / (x1[i] > tiny? x1[i] : tiny));
-			}
-		} else {
-			for (j = 0; j < d0; ++j) {
-				float *x1 = &y1->x[j * n1], *x0 = &y0->x[j * n1];
-				for (i = 0; i < n1; ++i)
-					if (x0[i] > 0.0f)
-						cost += c->x[i] * x0[i] * log(x0[i] / (x1[i] > tiny? x1[i] : tiny));
-			}
-		}
-		p->x[0] = (float)(cost / d0);
-	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
-		float t = p->g[0] / d0;
-		if (c == 0) {
-			for (j = 0; j < d0; ++j) {
-				float *g = &y1->g[j * n1], *x1 = &y1->x[j * n1], *x0 = &y0->x[j * n1];
-				for (i = 0; i < n1; ++i)
-					g[i] -= t * x0[i] / (x1[i] > tiny? x1[i] : tiny);
-			}
-		} else {
-			for (j = 0; j < d0; ++j) {
-				float *g = &y1->g[j * n1], *x1 = &y1->x[j * n1], *x0 = &y0->x[j * n1];
-				for (i = 0; i < n1; ++i)
-					g[i] -= t * c->x[i] * x0[i] / (x1[i] > tiny? x1[i] : tiny);
-			}
-		}
+        if (remote){
+            assert(false);
+        }else{
+            if (c == 0) {
+                vector<double> cost(batch_size, 0.);
+                for (i = 0; i < n1; ++i){
+                    engine->decrypt(y1->x_c[i], *plaintext);
+                    engine->decode(*plaintext, test_t);
+                    engine->decrypt(y0->x_c[i], *plaintext);
+                    engine->decode(*plaintext, truth_t);
+                    for (j=0; j<batch_size;j++)
+                        cost[j] += -log(test_t[j])*truth_t[j]/(float)(batch_size);
+                }
+                engine->encode(cost, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[0]);
+            } else {
+                vector<double> cost(batch_size, 0.);
+                for (i = 0; i < n1; ++i){
+                    engine->decrypt(y1->x_c[i], *plaintext);
+                    engine->decode(*plaintext, test_t);
+                    engine->decrypt(y0->x_c[i], *plaintext);
+                    engine->decode(*plaintext, truth_t);
+                    for (j=0; j<batch_size;j++)
+                        cost[j] += -c->x[i]*log(test_t[j])*truth_t[j]/(float)(batch_size);
+                }
+                engine->encode(cost, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[0]);
+            }
+        }
+	} else if (action == KAD_BACKWARD && (kad_is_back(y1))) {
+        if (remote){
+            assert(false);
+        }else{
+            float coeff = p->g[0] / (float)(batch_size);
+            if (c == 0) {
+                for (i = 0; i < n1; ++i){
+                    engine->decrypt(y1->x_c[i], *plaintext);
+                    engine->decode(*plaintext, test_t);
+                    engine->decrypt(y0->x_c[i], *plaintext);
+                    engine->decode(*plaintext, truth_t);
+                    for (j = 0; j < batch_size; j++)
+                        test_t[j] = -coeff * truth_t[j] * 1.0 / test_t[j];
+                    engine->encode(test_t, *plaintext);
+                    seal_add_inplace(y1->g_c[i], *plaintext);
+                }
+            } else {
+                for (i = 0; i < n1; ++i){
+                    engine->decrypt(y1->x_c[i], *plaintext);
+                    engine->decode(*plaintext, test_t);
+                    engine->decrypt(y0->x_c[i], *plaintext);
+                    engine->decode(*plaintext, truth_t);
+                    for (j=0; j<batch_size; j++)
+                        test_t[j] = -coeff * c->x[i] * truth_t[j] * 1.0 / test_t[j];
+                    engine->encode(test_t, *plaintext);
+                	seal_add_inplace(y1->g_c[i], *plaintext);
+                }
+		    }
+        }
 	}
 	return 0;
 }
 
 /********** Normalization **********/
-
 int kad_op_stdnorm(kad_node_t *p, int action)
-{
+{assert(false);
+    printf("not implemented");
+/***
 	int i, j, n, m;
 	kad_node_t *q = p->child[0];
 	assert(q->n_d > 0);
@@ -1643,81 +1784,174 @@ int kad_op_stdnorm(kad_node_t *p, int action)
 				qg[i] += std_inv * (pg[i] - s - px[i] * t);
 		}
 	}
+    ***/
 	return 0;
 }
 
 /********** Activation functions **********/
-
 int kad_op_sigm(kad_node_t *p, int action)
 {
-	int i, n;
+	int i, n, j;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i)
-			p->x[i] = 1.0f / (1.0f + expf(-q->x[i]));
+        if (remote){
+            assert(false);
+        }else{
+            for (i = 0; i < n; i++){
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    t[j] = 1.0f / (1.0f + expf(-t[j]));
+                engine->encode(t, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			q->g[i] += p->g[i] * (p->x[i] * (1.0f - p->x[i]));
+        if (remote){
+            assert(false);
+        }
+        else{
+            for (i=0; i<n; i++){
+                engine->decrypt(p->x_c[i], *plaintext);
+                engine->decode(*plaintext, test_t);
+                engine->decrypt(p->g_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    test_t[j] = t[j] * (test_t[j] * (1. - test_t[j]));
+                engine->encode(test_t, *plaintext);
+                seal_add_inplace(q->g_c[i], *plaintext);
+            }
+        }
 	}
 	return 0;
 }
 
 int kad_op_tanh(kad_node_t *p, int action)
 {
-	int i, n;
+	int i, n, j;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i) {
-			if (q->x[i] < -20.0f) p->x[i] = -1.0f;
-			else {
-				float y;
-				y = expf(-2.0f * q->x[i]);
-				p->x[i] = (1.0f - y) / (1.0f + y);
-			}
+        if (remote){
+            assert(false);
+        }else{
+            for (i = 0; i < n; i++){
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j){
+                    if (t[j] < -20.0f) t[j] = -1.0f;
+                    else {
+                        float y;
+                        y = expf(-2.0f * t[j]);
+                        t[j] = (1.0f - y) / (1.0f + y);
+                    }
+                }
+                engine->encode(t, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
 		}
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			q->g[i] += p->g[i] * (1.0f - p->x[i] * p->x[i]);
+        if (remote){
+            assert(false);
+        }
+        else{
+            for (i=0; i<n; i++){
+                engine->decrypt(p->x_c[i], *plaintext);
+                engine->decode(*plaintext, test_t);
+                engine->decrypt(p->g_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    test_t[j] = t[j] * (1. - test_t[j] * test_t[j]);
+                engine->encode(test_t, *plaintext);
+                seal_add_inplace(q->g_c[i], *plaintext);
+            }
+        }
 	}
 	return 0;
 }
 
 int kad_op_relu(kad_node_t *p, int action)
 {
-	int i, n;
+	int i, n, j;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i)
-			p->x[i] = q->x[i] > 0.0f? q->x[i] : 0.0f;
+        if (remote){
+            assert(false);
+        }else{
+            for (i = 0; i < n; i++){
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    t[j] = t[j] > 0.0f? t[j] : 0.0f;
+                engine->encode(t, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			if (q->x[i] > 0.0f)
-				q->g[i] += p->g[i];
+        if (remote){
+            assert(false);
+        }
+        else{
+            for (i=0; i<n; i++){
+                engine->decrypt(p->x_c[i], *plaintext);
+                engine->decode(*plaintext, test_t);
+                engine->decrypt(p->g_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    test_t[j] = test_t[j] > 0.0f? t[j] : 0.0f;
+                engine->encode(test_t, *plaintext);
+				engine->encrypt(*plaintext, *ciphertext);
+                seal_add_inplace(q->g_c[i], *ciphertext);
+            }
+        }
 	}
 	return 0;
 }
 
 int kad_op_sin(kad_node_t *p, int action)
 {
-	int i, n;
+	int i, n, j;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (i = 0; i < n; ++i) p->x[i] = sinf(q->x[i]);
+        if (remote){
+            assert(false);
+        }else{
+            for (i = 0; i < n; i++){
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    t[j] = sinf(t[j]);
+                engine->encode(t, *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (i = 0; i < n; ++i)
-			q->g[i] += p->g[i] * cosf(q->x[i]);
+        if (remote){
+            assert(false);
+        }
+        else{
+            for (i=0; i<n; i++){
+                engine->decrypt(q->x_c[i], *plaintext);
+                engine->decode(*plaintext, test_t);
+                engine->decrypt(p->g_c[i], *plaintext);
+                engine->decode(*plaintext, t);
+                for (j = 0; j < t.size(); ++j)
+                    test_t[j] = t[j]*cosf(test_t[j]);
+                engine->encode(test_t, *plaintext);
+                seal_add_inplace(q->g_c[i], *plaintext);
+            }
+        }
 	}
 	return 0;
 }
@@ -1726,38 +1960,80 @@ int kad_op_softmax(kad_node_t *p, int action)
 {
 	int i, j, n1, d0;
 	kad_node_t *q = p->child[0];
+	float s;
+	int batch_size = q->x_c[0].size();
 
 	n1 = q->d[q->n_d - 1];
-	d0 = kad_len(q) / n1;
+	//d0 = kad_len(q) / n1;
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		for (j = 0; j < d0; ++j) {
-			float s, max, *x = &q->x[j * n1], *y = &p->x[j * n1];
-			for (i = 0, max = -FLT_MAX; i < n1; ++i)
-				max = max > x[i]? max : x[i];
-			for (i = 0, s = 0.0f; i < n1; ++i) {
-				y[i] = expf(x[i] - max);
-				s += y[i];
-			}
-			for (i = 0, s = 1.0f / s; i < n1; ++i) y[i] *= s;
-		}
+        if (remote){
+            assert(false);
+        }else{
+            vector<vector<double>> raw_value(n1, vector<double>(batch_size, 0.));
+            vector<double> &y = test_t;
+            vector<double> &max = truth_t; 
+			y.resize(batch_size);
+			max.resize(batch_size);
+            for (j = 0; j < batch_size; ++j)
+                max[j] = -FLT_MAX;
+            for (i = 0; i < n1; i++){
+                engine->decrypt(q->x_c[i],*plaintext);
+                engine->decode(*plaintext,raw_value[i]);
+                for (j = 0; j < batch_size; ++j)
+                    max[j] = max[j] > raw_value[i][j]? max[j] : raw_value[i][j];
+            }
+            for (j = 0; j < batch_size; ++j){
+                for (i = 0, s = 0.0f; i < n1; i++){
+                    raw_value[i][j] = expf(raw_value[i][j]-max[j]);
+                    s += raw_value[i][j];
+                }
+                for (i = 0, s = 1.0f /s; i < n1; ++i)
+                    raw_value[i][j] *= s;
+            }
+            for (i = 0; i < n1; i++){
+                engine->encode(raw_value[i], *plaintext);
+                engine->encrypt(*plaintext, p->x_c[i]);
+            }
+        }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		for (j = 0; j < d0; ++j) {
-			float s, *g = &p->g[j * n1], *y = &p->x[j * n1], *h = &q->g[j * n1];
-			for (i = 0, s = 0.0f; i < n1; ++i)
-				s += g[i] * y[i];
-			for (i = 0; i < n1; ++i)
-				h[i] += y[i] * (g[i] - s);
-		}
+        if (remote){
+            assert(false);
+        }else{
+            vector<vector<double>> raw_value(n1, vector<double>(batch_size, 0.));
+            vector<vector<double>> raw_gradient(n1, vector<double>(batch_size, 0.));
+            for (i = 0; i < n1; i++){
+                engine->decrypt(q->x_c[i],*plaintext);
+                engine->decode(*plaintext,raw_value[i]);
+                engine->decrypt(p->g_c[i],*plaintext);
+                engine->decode(*plaintext,raw_gradient[i]);
+            }
+			// for x0, the gradient is g1*y1*(1-y1)-g2*y1*y2-g3*y1*y3 = y1(g1-(\Sigma_i y_i*g_i))
+            for (j = 0; j < batch_size; ++j){
+                for (i = 0, s = 0.0f; i < n1; i++)
+                    s += raw_gradient[i][j] * raw_value[i][j];
+                for (i = 0; i < n1; i ++)
+                    raw_value[i][j] = raw_value[i][j]*(raw_gradient[i][j] - s);
+            }
+            for (i = 0; i < n1; i++){
+                engine->encode(raw_value[i], *plaintext);
+                seal_add_inplace(q->g_c[i], *plaintext);
+            } 
+        }
 	}
 	return 0;
 }
 
 /********** Multi-node pooling **********/
 
+// we need this.
 int kad_op_avg(kad_node_t *p, int action)
 {
+	assert(false);
+    //not implemented
+    //
+    /***
 	int i, n;
 	float tmp;
 	kad_node_t *q;
@@ -1771,7 +2047,7 @@ int kad_op_avg(kad_node_t *p, int action)
 			if (kad_len(p->child[i]) != n) return -1;
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		memcpy(p->x, q->x, n * sizeof(float));
+		std::memcpy(p->x, q->x, n * sizeof(float));
 		for (i = 1; i < p->n_child; ++i)
 			kad_saxpy(n, 1.0f, p->child[i]->x, p->x);
 		for (i = 0; i < n; ++i) p->x[i] *= tmp;
@@ -1780,11 +2056,15 @@ int kad_op_avg(kad_node_t *p, int action)
 			if (kad_is_back(p->child[i]))
 				kad_saxpy(n, tmp, p->g, p->child[i]->g);
 	}
+    ***/
 	return 0;
 }
 
 int kad_op_max(kad_node_t *p, int action)
 {
+	assert(false);
+    //not implemented
+    /***
 	int i, n;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
@@ -1798,7 +2078,7 @@ int kad_op_max(kad_node_t *p, int action)
 	} else if (action == KAD_FORWARD) {
 		int j, *max_j = (int*)p->gtmp;
 		memset(max_j, 0, n * sizeof(int));
-		memcpy(p->x, q->x, n * sizeof(float));
+		std::memcpy(p->x, q->x, n * sizeof(float));
 		for (j = 1; j < p->n_child; ++j)
 			for (i = 0, q = p->child[j]; i < n; ++i)
 				if (q->x[i] > p->x[i]) p->x[i] = q->x[i], max_j[i] = j;
@@ -1807,11 +2087,15 @@ int kad_op_max(kad_node_t *p, int action)
 		for (i = 0; i < n; ++i)
 			p->child[max_j[i]]->g[i] += p->g[i];
 	}
+    ***/
 	return 0;
 }
 
 int kad_op_stack(kad_node_t *p, int action) /* TODO: allow axis, as in TensorFlow */
 {
+    //not implemented for now
+	assert(false);
+	/**
 	int i, n, axis = 0;
 	kad_node_t *q;
 
@@ -1825,14 +2109,15 @@ int kad_op_stack(kad_node_t *p, int action) /* TODO: allow axis, as in TensorFlo
 		for (i = 0; i < axis; ++i) p->d[i] = q->d[i];
 		p->d[axis] = p->n_child;
 		for (; i < q->n_d; ++i) p->d[i+1] = q->d[i];
-	} else if (action == KAD_FORWARD) { /* TODO: doesn't work when axis != 0 */
+	} else if (action == KAD_FORWARD) { // TODO: doesn't work when axis != 0 
 		for (i = 0; i < p->n_child; ++i)
-			memcpy(&p->x[i * n], p->child[i]->x, n * sizeof(float));
+			std::memcpy(&p->x[i * n], p->child[i]->x, n * sizeof(float));
 	} else if (action == KAD_BACKWARD) {
 		for (i = 0; i < p->n_child; ++i)
 			if (kad_is_back(p->child[i]))
 				kad_saxpy(n, 1.0f, &p->g[i * n], p->child[i]->g);
 	}
+	**/
 	return 0;
 }
 
@@ -1853,9 +2138,9 @@ int kad_op_select(kad_node_t *p, int action)
 		if (i < p->n_child) return -1;
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-		memcpy(p->x, q->x, n * sizeof(float));
+		std::memcpy(p->x_c, q->x_c, n * sizeof(SEALCiphertext));
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-		kad_saxpy(n, 1.0f, p->g, q->g);
+		kad_saxpy(n, 1.0f, p->g_c, q->g_c);
 	}
 	return 0;
 }
@@ -1872,29 +2157,16 @@ static void conv_rot180(int d0, int d1, float *x) /* rotate/reverse a weight mar
 	}
 }
 
-static void conv2d_move_1to3(int d[4], const float *x, float *y) /* convert the NCHW shape to the NHWC shape */
+static void conv_rot180(int d0, int d1, SEALCiphertext *x) /* rotate/reverse a weight martix */
 {
-	int i, j, k, l;
-	for (i = 0; i < d[0]; ++i)
-		for (j = 0; j < d[1]; ++j)
-			for (k = 0; k < d[2]; ++k) {
-				int ik = (i * d[2] + k) * d[3], ijk = ((i * d[1] + j) * d[2] + k) * d[3];
-				for (l = 0; l < d[3]; ++l)
-					y[(ik + l) * d[1] + j] = x[ijk + l];
-			}
+	int i, j;
+	for (i = 0; i < d0; ++i) {
+		SEALCiphertext tmp(engine), *xi = &x[i * d1];
+		for (j = 0; j < d1>>1; ++j)
+			tmp = xi[j], xi[j] = xi[d1-1-j], xi[d1-1-j] = tmp; 
+	}
 }
 
-static void conv2d_add_3to1(int d[4], const float *y, float *x) /* convert the NHWC shape back to NCHW and add to another NCHW-shaped array */
-{
-	int i, j, k, l;
-	for (i = 0; i < d[0]; ++i)
-		for (j = 0; j < d[1]; ++j)
-			for (k = 0; k < d[2]; ++k) {
-				int ik = (i * d[2] + k) * d[3], ijk = ((i * d[1] + j) * d[2] + k) * d[3];
-				for (l = 0; l < d[3]; ++l)
-					x[ijk + l] += y[(ik + l) * d[1] + j];
-			}
-}
 
 #define conv_out_size(in_size, aux) (((in_size) - (aux)->kernel_size + (aux)->pad[0] + (aux)->pad[1]) / (aux)->stride + 1)
 
@@ -1902,7 +2174,7 @@ static void conv2d_add_3to1(int d[4], const float *y, float *x) /* convert the N
 	int j, l; \
 	if (_stride > 1) { \
 		for (l = 0; l < _wn; ++l) { \
-			const float *xl = &_xx[l - _pad]; \
+			const SEALCiphertext *xl = &_xx[l - _pad]; \
 			for (j = 0; j < _pn; ++j, xl += _stride) _t[j] = *xl; \
 			kad_saxpy(_pn, _ww[l], _t, _yy); \
 		} \
@@ -1910,13 +2182,14 @@ static void conv2d_add_3to1(int d[4], const float *y, float *x) /* convert the N
 } while (0)
 
 #define process_row_back_x(_xx, _ww, _yy, _wn, _pn, _stride, _pad, _t) do { \
-	int j, l; \
+	int j, l, k; \
 	if (_stride > 1) { \
 		for (l = 0; l < _wn; ++l) { \
-			float *xl = &_xx[l - _pad]; \
-			memset(_t, 0, _pn * sizeof(float)); \
+			SEALCiphertext *xl = &_xx[l - _pad]; \
+            for (k = 0; k < _pn; k++) \
+                _t[k].clean() = true; \
 			kad_saxpy(_pn, _ww[l], _yy, _t); \
-			for (j = 0; j < _pn; ++j, xl += _stride) *xl += _t[j]; \
+			for (j = 0; j < _pn; ++j, xl += _stride) seal_add_inplace(*xl, _t[j]); \
 		} \
 	} else for (l = 0; l < _wn; ++l) kad_saxpy(_pn, _ww[l], _yy, &_xx[l - _pad]); \
 } while (0)
@@ -1925,11 +2198,15 @@ static void conv2d_add_3to1(int d[4], const float *y, float *x) /* convert the N
 	int j, l; \
 	if (_stride > 1) { \
 		for (l = 0; l < _wn; ++l) { \
-			const float *xl = &_xx[l - _pad]; \
+			const SEALCiphertext *xl = &_xx[l - _pad]; \
 			for (j = 0; j < _pn; ++j, xl += _stride) _t[j] = *xl; \
-			_ww[l] += kad_sdot(_pn, _yy, _t); \
+			*ciphertext = kad_sdot(_pn, _yy, _t); \
+            seal_add_inplace(_ww[l], *ciphertext); \
 		} \
-	} else for (l = 0; l < _wn; ++l) _ww[l] += kad_sdot(_pn, _yy, &_xx[l - _pad]); \
+	} else for (l = 0; l < _wn; ++l){ \
+        *ciphertext = kad_sdot(_pn, _yy, &_xx[l - _pad]); \
+        seal_add_inplace(_ww[l], *ciphertext); \
+    } \
 } while (0)
 
 /* Forward and backward passes are implemented with two different algorithms.
@@ -1937,104 +2214,80 @@ static void conv2d_add_3to1(int d[4], const float *y, float *x) /* convert the N
  * second algorithm is faster. Both algorithms should produce identical
  * results, up to the precision of "float".
  */
-int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-width (NCHW) shape */
+
+/* henry 2020.10.6 just implement the CWH method: the first method. */
+
+
+int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-width (CHW) shape */
 {
-#define conv2d_loop1(_x, _w, _y, _tmp, _row_func) do { /* for the NCHW shape */ \
-		int n, c1, c0, i, k, ii; \
-		for (n = 0; n < q->d[0]; ++n) /* mini-batch */ \
-			for (c1 = 0; c1 < w->d[0]; ++c1) /* output channel */ \
-				for (c0 = 0; c0 < w->d[1]; ++c0) /* input channel */ \
-					for (k = 0; k < w->d[2]; ++k) { /* kernel row */ \
-						float *_ww = &(_w)[((c1 * w->d[1] + c0) * w->d[2] + k) * w->d[3]]; \
-						for (i = 0, ii = k - aux[0].pad[0]; i < p->d[2] && ii >= 0 && ii < q->d[2]; ++i, ii += aux[0].stride) { /* output row */ \
-							float *_xx = &(_x)[((n * q->d[1] + c0) * q->d[2] + ii) * q->d[3]]; \
-							float *_yy = &(_y)[((n * p->d[1] + c1) * p->d[2] + i)  * p->d[3]]; \
-							if (x_padded) { \
-								memcpy(x_padded + aux[1].pad[0], _xx, q->d[3] * sizeof(float)); \
-								_xx = x_padded + aux[1].pad[0]; \
-							} \
-							_row_func(_xx, _ww, _yy, w->d[3], p->d[3], aux[1].stride, aux[1].pad[0], (_tmp)); \
-						} /* ~i */ \
-					} /* ~k, c0, c1, n */ \
+#define conv2d_loop1(_x, _w, _y, _tmp, _row_func) do { /* for the CHW shape */ \
+		int n, c1, c0, i, k, ii, j; \
+        for (c1 = 0; c1 < w->d[0]; ++c1) /* output channel */ \
+            for (c0 = 0; c0 < w->d[1]; ++c0) /* input channel */ \
+                for (k = 0; k < w->d[2]; ++k) { /* kernel row */ \
+                    auto _ww = &(_w)[((c1 * w->d[1] + c0) * w->d[2] + k) * w->d[3]]; \
+                    for (i = 0, ii = k - aux[0].pad[0]; i < p->d[1] && ii >= 0 && ii < q->d[1]; ++i, ii += aux[0].stride) { /* output row */ \
+                        SEALCiphertext * _xx = &(_x)[((n * q->d[0] + c0) * q->d[1] + ii) * q->d[2]]; \
+                        SEALCiphertext * _yy = &(_y)[((n * p->d[0] + c1) * p->d[1] + i)  * p->d[2]]; \
+                        if (x_padded) { \
+							for (j = 0; j < q->d[2]; j ++) \
+								x_padded[aux[1].pad[0] + j] = _xx[j]; \
+                            _xx = x_padded + aux[1].pad[0]; \
+                        } \
+                        _row_func(_xx, _ww, _yy, w->d[3], p->d[2], aux[1].stride, aux[1].pad[0], (_tmp)); \
+                    } /* ~i */ \
+                } /* ~k, c0, c1, n */ \
 	} while (0)
 
-#define conv2d_loop2(_x, _w, _y, _code) do { /* for the NHWC shape */ \
-		int n, c1, i, j, k, ii, j_skip = aux[1].stride * q->d[1], m = w->d[3] * w->d[1]; \
-		for (n = 0; n < q->d[0]; ++n) /* mini-batch */ \
-			for (c1 = 0; c1 < w->d[0]; ++c1) /* output channel */ \
-				for (k = 0; k < w->d[2]; ++k) { /* kernel row */ \
-					float *_ww = &(_w)[(c1 * w->d[2] + k) * m]; \
-					for (i = 0, ii = k - aux[0].pad[0]; i < p->d[2] && ii >= 0 && ii < q->d[2]; ++i, ii += aux[0].stride) { /* output and input row */ \
-						float *_xx = &(_x)[(n * q->d[2] + ii) * q->d[3] * q->d[1]]; \
-						float *_yy = &(_y)[((n * p->d[1] + c1) * p->d[2] + i) * p->d[3]]; \
-						if (x_padded) { \
-							memcpy(x_padded + aux[1].pad[0] * q->d[1], _xx, q->d[3] * q->d[1] * sizeof(float)); \
-							_xx = x_padded; \
-						} \
-						for (j = 0; j < p->d[3]; ++j, _xx += j_skip, ++_yy) _code; /* output and input column */ \
-					} /* ~i */ \
-				} /* ~k, c1, n */ \
-	} while (0)
-
+    int l;
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0], *w = p->child[1];
-	float *t = 0, *q1 = 0, *w1 = 0, *x_padded = 0;
-	int algo_switch = 0;
+	SEALCiphertext *t = 0, *q1 = 0, *w1 = 0, *x_padded = 0;
 
 	if (action == KAD_FORWARD || action == KAD_BACKWARD) { /* allocate working space */
-		if (w->d[3] * w->d[1] < 16) {
-			t = (float*)malloc(p->d[3] * sizeof(float));
-			x_padded = aux[1].pad[0] + aux[1].pad[1] > 0? (float*)calloc(q->d[3] + aux[1].pad[0] + aux[1].pad[1], sizeof(float)) : 0;
-		} else {
-			q1 = (float*)malloc(kad_len(q) * sizeof(float));
-			w1 = (float*)malloc(kad_len(w) * sizeof(float));
-			x_padded = aux[1].pad[0] + aux[1].pad[1] > 0? (float*)calloc((q->d[3] + aux[1].pad[0] + aux[1].pad[1]) * q->d[1], sizeof(float)) : 0;
-			algo_switch = 1;
-		}
+        t = (SEALCiphertext *)malloc(p->d[2] * sizeof(SEALCiphertext));
+        x_padded = aux[1].pad[0] + aux[1].pad[1] > 0? (SEALCiphertext*)calloc(q->d[2] + aux[1].pad[0] + aux[1].pad[1], sizeof(SEALCiphertext)) : 0;
 	}
 	if (action == KAD_SYNC_DIM) {
-		if (q->n_d != 4 || w->n_d != 4) return -1;
-		if (q->d[1] != w->d[1]) return -1; /* unmatched input channels */
-		p->n_d = 4;
-		p->d[0] = q->d[0], p->d[1] = w->d[0], p->d[2] = conv_out_size(q->d[2], &aux[0]), p->d[3] = conv_out_size(q->d[3], &aux[1]);
+		if (q->n_d != 3 || w->n_d != 4) return -1;
+		if (q->d[0] != w->d[1]) return -1; /* unmatched input channels */
+		p->n_d = 3;
+		p->d[0] = w->d[0], p->d[1] = conv_out_size(q->d[1], &aux[0]), p->d[2] = conv_out_size(q->d[2], &aux[1]);
 	} else if (action == KAD_FORWARD) {
-		conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
-		memset(p->x, 0, kad_len(p) * sizeof(float));
-		if (!algo_switch) { /* this is the first algorithm */
-			conv2d_loop1(q->x, w->x, p->x, t, process_row_for);
-		} else { /* this is the second algorithm */
-			conv2d_move_1to3(q->d, q->x, q1);
-			conv2d_move_1to3(w->d, w->x, w1);
-			conv2d_loop2(q1, w1, p->x, (*_yy += kad_sdot(m, _ww, _xx)));
+        if(seal_is_encrypted(w)){
+		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+            for (l = 0; l < kad_len(p); l++)
+                p->x_c[l].clean() = true;
+            conv2d_loop1(q->x_c, w->x_c, p->x_c, t, process_row_for);
+            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+        }else{
+		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+            for (l = 0; l < kad_len(p); l++)
+                p->x_c[l].clean() = true;
+            conv2d_loop1(q->x_c, w->x, p->x_c, t, process_row_for);
+            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 		}
-		conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 	} else if (action == KAD_BACKWARD) {
 		if (kad_is_back(p->child[0])) { /* backprop to the input array */
-			conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
-			if (!algo_switch) {
-				conv2d_loop1(q->g, w->x, p->g, t, process_row_back_x);
-			} else {
-				memset(q1, 0, kad_len(q) * sizeof(float));
-				conv2d_move_1to3(w->d, w->x, w1);
-				conv2d_loop2(q1, w1, p->g, kad_saxpy(m, *_yy, _ww, _xx));
-				conv2d_add_3to1(q->d, q1, q->g);
-			}
-			conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+            if(seal_is_encrypted(w)){
+                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+                conv2d_loop1(q->g_c, w->x_c, p->g_c, t, process_row_back_x);
+                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+
+            }else{
+                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+                conv2d_loop1(q->g_c, w->x, p->g_c, t, process_row_back_x);
+                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+
+            }
 		}
 		if (kad_is_back(p->child[1])) { /* backprop to the weight matrix */
-			conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g);
-			if (!algo_switch) {
-				conv2d_loop1(q->x, w->g, p->g, t, process_row_back_w);
-			} else {
-				conv2d_move_1to3(q->d, q->x, q1);
-				memset(w1, 0, kad_len(w) * sizeof(float));
-				conv2d_loop2(q1, w1, p->g, kad_saxpy(m, *_yy, _xx, _ww));
-				conv2d_add_3to1(w->d, w1, w->g);
-			}
-			conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g);
+            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
+            conv2d_loop1(q->x_c, w->g_c, p->g_c, t, process_row_back_w);
+            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
 		}
 	}
-	free(t); free(q1); free(w1); free(x_padded);
+	std::free(t); std::free(q1); std::free(w1); std::free(x_padded);
 	return 0;
 }
 
@@ -2042,69 +2295,73 @@ int kad_op_max2d(kad_node_t *p, int action)
 {
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0];
+	int batch_size = q->x_c[0].size();
 	if (action == KAD_SYNC_DIM) {
-		if (q->n_d != 4) return -1;
-		p->n_d = 4;
-		p->d[0] = q->d[0], p->d[1] = q->d[1], p->d[2] = conv_out_size(q->d[2], &aux[0]), p->d[3] = conv_out_size(q->d[3], &aux[1]);
+		if (q->n_d != 3) return -1;
+		p->n_d = 3;
+		p->d[0] = q->d[0], p->d[1] = conv_out_size(q->d[1], &aux[0]), p->d[2] = conv_out_size(q->d[2], &aux[1]);
 	} else if (action == KAD_ALLOC) {
 		p->gtmp = realloc(p->gtmp, kad_len(p) * sizeof(int));
 	} else if (action == KAD_FORWARD) {
-		int rest = 1, len, t, i;
-		int *f = (int*)p->gtmp;
-		len = kad_len(p);
-		for (i = 0; i < len; ++i) p->x[i] = -FLT_MAX;
-		for (i = 0; i < p->n_d - 2; ++i) rest *= p->d[i];
-		for (t = 0; t < rest; ++t) {
-			int i, j, k, l, p_row = p->d[p->n_d - 2], p_col = p->d[p->n_d - 1];
-			for (i = 0; i < p_row; ++i) {
-				int u = (t * p_row + i) * p_col;
-				for (k = 0; k < aux[0].kernel_size; ++k) {
-					int v, v0, v_end, ii = i * aux[0].stride + k - aux[0].pad[0];
-					if (ii < 0 || ii >= q->d[p->n_d - 2]) continue;
-					v0 = (t * q->d[p->n_d - 2] + ii) * q->d[p->n_d - 1];
-					v_end = v0 + q->d[p->n_d - 1];
-					for (l = 0; l < aux[1].kernel_size; ++l)
-						for (j = 0, v = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0); j < p_col && v < v_end; ++j, v += aux[1].stride)
-							if (p->x[u + j] < q->x[v])
-								p->x[u + j] = q->x[v], f[u + j] = v;
-				} /* ~k */
-			} /* ~i */
-		}
+        if (remote){
+            assert(false);
+        }else{
+            int rest = 1, len, t, i;
+            int *f = (int*)p->gtmp;
+            len = kad_len(p);
+            for (i = 0; i < len; ++i) p->x_c[i].clean() = true;
+            for (i = 0; i < p->n_d - 2; ++i) rest *= p->d[i];
+            for (t = 0; t < rest; ++t) {
+                int i, j, k, l, m, p_row = p->d[p->n_d - 2], p_col = p->d[p->n_d - 1];
+
+                for (i = 0; i < p_row; ++i)
+                    for (j = 0; j < p_col; ++j){
+                        vector<double> max(batch_size, -FLT_MAX);
+                        int out_po = (t * p_row + i) * p_col + j;
+                        for (k = 0; k < aux[0].kernel_size; ++k){
+                            for (l = 0; l < aux[1].kernel_size; ++l){
+								//ii: current row 
+                                int ii = i * aux[0].stride + k - aux[0].pad[0];
+                                if (ii < 0 || ii >= q->d[p->n_d-2]) continue;
+								//v0: starting index in the current row
+								//v_end: ending index in the current row
+								//in_po: current input index
+								//out_po: current output index
+								//max: current max batch
+								//f: current used input index
+                                int v0 = (t * q->d[p->n_d - 2] + ii) * q->d[p->n_d - 1];
+                                int v_end = v0 + q->d[p->n_d - 1];
+                                int in_po = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0) + aux[1].stride * j;
+                                if (in_po >= v_end) continue;
+                                engine->decrypt(q->x_c[in_po], *plaintext);
+                                engine->decode(*plaintext, test_t);
+                                for ( m = 0; m < batch_size; m++)
+                                    if ( test_t[m] > max[m])
+                                        max[m] = test_t[m], f[out_po] = in_po;
+                            }
+						}
+                        engine->encode(max, *plaintext);
+                        engine->encrypt(*plaintext, p->x_c[out_po]); 
+                    }
+            }
+        }
 	} else if (action == KAD_BACKWARD) {
 		int i, len, *f = (int*)p->gtmp;
 		len = kad_len(p);
-		for (i = 0; i < len; ++i) q->g[f[i]] += p->g[i];
+		for (i = 0; i < len; ++i) seal_add_inplace(q->g_c[f[i]],p->g_c[i]);
 	}
 	return 0;
 }
 
-/********** 1D convolution **********/
-
-static void conv1d_move_1to2(int d[3], const float *x, float *y)
-{
-	int i, j, k;
-	for (k = 0; k < d[0]; ++k)
-		for (j = 0; j < d[1]; ++j)
-			for (i = 0; i < d[2]; ++i)
-				y[(k * d[2] + i) * d[1] + j] = x[(k * d[1] + j) * d[2] + i];
-}
-
-static void conv1d_add_2to1(int d[3], const float *y, float *x)
-{
-	int i, j, k;
-	for (k = 0; k < d[0]; ++k)
-		for (j = 0; j < d[1]; ++j)
-			for (i = 0; i < d[2]; ++i)
-				x[(k * d[1] + j) * d[2] + i] += y[(k * d[2] + i) * d[1] + j];
-}
 
 int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW) shape */
-{
-#define conv1d_loop1(_x, _w, _y, _tmp, _row_func) do { /* for the NCW shape */ \
+{assert(false);
+	/**
+#define conv1d_loop1(_x, _w, _y, _tmp, _row_func) do { // for the NCW shape \
 		int n, c1, c0; \
-		for (n = 0; n < q->d[0]; ++n) /* mini-batch */ \
-			for (c1 = 0; c1 < w->d[0]; ++c1) /* output channel */ \
-				for (c0 = 0; c0 < w->d[1]; ++c0) { /* input channel */ \
+		for (n = 0; n < q->d[0]; ++n) //* mini-batch  \
+			for (c1 = 0; c1 < w->d[0]; ++c1) //* output channel  \
+				for (c0 = 0; c0 < w->d[1]; ++c0) { //* input channel  \
 					float *_ww = &(_w)[(c1 * w->d[1] + c0) * w->d[2]]; \
 					float *_xx = &(_x)[(n  * q->d[1] + c0) * q->d[2]]; \
 					float *_yy = &(_y)[(n  * p->d[1] + c1) * p->d[2]]; \
@@ -2113,13 +2370,13 @@ int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW
 						_xx = x_padded + aux->pad[0]; \
 					} \
 					_row_func(_xx, _ww, _yy, w->d[2], p->d[2], aux->stride, aux->pad[0], (_tmp)); \
-				} /* ~c0, c1, n */ \
+				} //* ~c0, c1, n  \
 	} while (0)
 
-#define conv1d_loop2(_x, _w, _y, _code) do { /* for the NWC shape */ \
+#define conv1d_loop2(_x, _w, _y, _code) do { //* for the NWC shape  \
 		int n, c1, j, j_skip = aux->stride * q->d[1], m = w->d[2] * w->d[1]; \
-		for (n = 0; n < q->d[0]; ++n) /* mini-batch */ \
-			for (c1 = 0; c1 < w->d[0]; ++c1) { /* output channel */ \
+		for (n = 0; n < q->d[0]; ++n) //* mini-batch  \
+			for (c1 = 0; c1 < w->d[0]; ++c1) { //* output channel  \
 				float *_ww = &(_w)[c1 * m]; \
 				float *_xx = &(_x)[n * q->d[1] * q->d[2]]; \
 				float *_yy = &(_y)[(n * p->d[1] + c1) * p->d[2]]; \
@@ -2128,7 +2385,7 @@ int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW
 					_xx = x_padded; \
 				} \
 				for (j = 0; j < p->d[2]; ++j, _xx += j_skip, ++_yy) _code; \
-			} /* ~c1, n */ \
+			} //* ~c1, n  \
 	} while (0)
 
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
@@ -2136,7 +2393,7 @@ int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW
 	float *t = 0, *q1 = 0, *w1 = 0, *x_padded = 0;
 	int algo_switch = 0;
 
-	if (action == KAD_FORWARD || action == KAD_BACKWARD) { /* allocate working space */
+	if (action == KAD_FORWARD || action == KAD_BACKWARD) { //* allocate working space 
 		if (w->d[2] * w->d[1] < 32) {
 			t = (float*)malloc(p->d[2] * sizeof(float));
 			x_padded = aux->pad[0] + aux->pad[1] > 0? (float*)calloc(q->d[2] + aux->pad[0] + aux->pad[1], sizeof(float)) : 0;
@@ -2149,22 +2406,22 @@ int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW
 	}
 	if (action == KAD_SYNC_DIM) {
 		if (q->n_d != 3 || w->n_d != 3) return -1;
-		if (q->d[1] != w->d[1]) return -1; /* unmatched input channels */
+		if (q->d[1] != w->d[1]) return -1; //* unmatched input channels 
 		p->n_d = 3;
 		p->d[0] = q->d[0], p->d[1] = w->d[0], p->d[2] = conv_out_size(q->d[2], aux);
 	} else if (action == KAD_FORWARD) {
 		conv_rot180(w->d[0] * w->d[1], w->d[2], w->x);
 		memset(p->x, 0, kad_len(p) * sizeof(float));
-		if (!algo_switch) { /* this is the first algorithm */
+		if (!algo_switch) { //* this is the first algorithm 
 			conv1d_loop1(q->x, w->x, p->x, t, process_row_for);
-		} else { /* this is the second algorithm */
+		} else { //* this is the second algorithm 
 			conv1d_move_1to2(q->d, q->x, q1);
 			conv1d_move_1to2(w->d, w->x, w1);
 			conv1d_loop2(q1, w1, p->x, (*_yy += kad_sdot(m, _ww, _xx)));
 		}
 		conv_rot180(w->d[0] * w->d[1], w->d[2], w->x);
 	} else if (action == KAD_BACKWARD) {
-		if (kad_is_back(p->child[0])) { /* backprop to the input array */
+		if (kad_is_back(p->child[0])) { //* backprop to the input array 
 			conv_rot180(w->d[0] * w->d[1], w->d[2], w->x);
 			if (!algo_switch) {
 				conv1d_loop1(q->g, w->x, p->g, t, process_row_back_x);
@@ -2176,7 +2433,7 @@ int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW
 			}
 			conv_rot180(w->d[0] * w->d[1], w->d[2], w->x);
 		}
-		if (kad_is_back(p->child[1])) { /* backprop to the weight matrix */
+		if (kad_is_back(p->child[1])) { //* backprop to the weight matrix 
 			conv_rot180(w->d[0] * w->d[1], w->d[2], w->g);
 			if (!algo_switch) {
 				conv1d_loop1(q->x, w->g, p->g, t, process_row_back_w);
@@ -2190,11 +2447,14 @@ int kad_op_conv1d(kad_node_t *p, int action) /* in the number-channel-width (NCW
 		}
 	}
 	free(t); free(q1); free(w1); free(x_padded);
+	***/
 	return 0;
 }
 
+
 int kad_op_max1d(kad_node_t *p, int action)
-{
+{assert(false);
+	/***
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0];
 	if (action == KAD_SYNC_DIM) {
@@ -2221,12 +2481,13 @@ int kad_op_max1d(kad_node_t *p, int action)
 		int i, len, *f = (int*)p->gtmp;
 		len = kad_len(p);
 		for (i = 0; i < len; ++i) q->g[f[i]] += p->g[i];
-	}
+	}***/
 	return 0;
 }
 
 int kad_op_avg1d(kad_node_t *p, int action)
-{
+{assert(false);
+	/***
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0];
 	if (action == KAD_SYNC_DIM) {
@@ -2260,7 +2521,7 @@ int kad_op_avg1d(kad_node_t *p, int action)
 				for (j = 0, v = v0 + (l > aux->pad[0]? l - aux->pad[0] : 0); j < p_width && v < v_end; ++j, v += aux->stride)
 					q->g[v] += p->g[u + j] / f[u + j];
 		}
-	}
+	}***/
 	return 0;
 }
 
@@ -2306,6 +2567,8 @@ kad_op_f kad_op_list[KAD_MAX_OP] = {
 	kad_op_reverse     /* 36: tf.reverse, but on one axis only */
 };
 
+
+
 char *kad_op_name[KAD_MAX_OP] = {
 	0, "add", "mul", "cmul", "ce_bin_neg", "square", "sigm", "tanh", "relu", "matmul", "avg", "1minus", "select", "ce_multi", "softmax",
 	"dropout", "conv2d", "max2d", "conv1d", "max1d", "slice", "max", "ce_bin", "sub", "sample_normal", "reduce_sum", "reduce_mean", "log",
@@ -2315,37 +2578,40 @@ char *kad_op_name[KAD_MAX_OP] = {
 /**************************
  *** Debugging routines ***
  **************************/
-
+/**
 void kad_trap_fe(void)
 {
 #ifdef __SSE__
 	_MM_SET_EXCEPTION_MASK(_MM_GET_EXCEPTION_MASK() & ~(_MM_MASK_INVALID | _MM_MASK_DIV_ZERO));
 #endif
 }
-
+**/
 void kad_print_graph(FILE *fp, int n, kad_node_t **v)
 {
 	int i, j;
 	for (i = 0; i < n; ++i) v[i]->tmp = i;
 	for (i = 0; i < n; ++i) {
 		kad_node_t *p = v[i];
-		fprintf(fp, "%d\t%x:%x\t%d\t", i, p->flag, p->ext_flag, p->ext_label);
-		if (p->pre) fprintf(fp, "%d\t", p->pre->tmp);
-		else fprintf(fp, ".\t");
+		std::fprintf(fp, "%d\t%x:%x\t%d\t", i, p->flag, p->ext_flag, p->ext_label);
+		if (p->pre) std::fprintf(fp, "%d\t", p->pre->tmp);
+		else std::fprintf(fp, ".\t");
 		fputs("[", fp);
 		for (j = 0; j < p->n_d; ++j) {
 			if (j) fputc(',', fp);
-			fprintf(fp, "%d", p->d[j]);
+			std::fprintf(fp, "%d", p->d[j]);
 		}
-		fprintf(fp, "]\t");
+		std::fprintf(fp, "]\t");
 		if (p->n_child) {
-			fprintf(fp, "%s(", kad_op_name[p->op]);
+			std::fprintf(fp, "%s(", kad_op_name[p->op]);
 			for (j = 0; j < p->n_child; ++j) {
 				if (j) fputc(',', fp);
-				fprintf(fp, "$%d", p->child[j]->tmp);
+				std::fprintf(fp, "$%d", p->child[j]->tmp);
 			}
-			fprintf(fp, ")");
-		} else fprintf(fp, "%s", kad_is_feed(p)? "feed" : kad_is_var(p)? "var" : kad_is_const(p)? "const" : "N/A");
+			std::fprintf(fp, ")");
+		} else {
+            std::fprintf(fp, "%s", kad_is_feed(p)? "feed" : kad_is_var(p)? "var" : kad_is_const(p)? "const" : "N/A");
+            std::fprintf(fp, "%s", seal_is_encrypted(p)? "encrypted" : "plain");
+		}
 		fputc('\n', fp);
 	}
 	for (i = 0; i < n; ++i) v[i]->tmp = 0;
@@ -2356,7 +2622,11 @@ static void kad_add_delta(int n, kad_node_t **a, float c, float *delta)
 	int i, k;
 	for (i = k = 0; i < n; ++i)
 		if (kad_is_var(a[i])) {
-			kad_saxpy(kad_len(a[i]), c, &delta[k], a[i]->x);
+            if (seal_is_encrypted(a[i])){
+                kad_saxpy(kad_len(a[i]), c, &delta[k], a[i]->x_c);
+            }else{
+                kad_saxpy(kad_len(a[i]), c, &delta[k], a[i]->x);
+            }
 			k += kad_len(a[i]);
 		}
 }
@@ -2364,33 +2634,64 @@ static void kad_add_delta(int n, kad_node_t **a, float c, float *delta)
 void kad_check_grad(int n, kad_node_t **a, int from)
 {
 	const float eps = 1e-5f, rel = 1e-7f / eps;
-	int i, k, n_var;
-	float *g0, *delta, f0, f_minus, f_plus, s0, s1, rel_err, p_m_err;
+	int i, k, j, n_var;
+	float *g0, *delta, s0, s1, rel_err, p_m_err,f_minus, f_plus, f0;
+	SEALCiphertext f_minus_c(engine), f_plus_c(engine), f0_c(engine);
+    SEALCiphertext *g0_c;
 	n_var = kad_size_var(n, a);
 	g0 = (float*)calloc(n_var, sizeof(float));
-	f0 = *kad_eval_at(n, a, from);
-	kad_grad(n, a, from);
-	for (i = k = 0; i < n; ++i)
+	f0_c = *kad_eval_at(n, a, from);
+	kad_grad(n, a, from, false);   //no need for you to fp/bp.
+	// collect plain gradients into g0
+	for (i = k = 0; i < n; ++i){
 		if (kad_is_var(a[i])) {
-			memcpy(&g0[k], a[i]->g, kad_len(a[i]) * sizeof(float));
+            if (seal_is_encrypted(a[i])){
+                for (j = 0; j < kad_len(a[i]); j++){
+                    // should be size 1
+					engine->decrypt(a[i]->g_c[j], *plaintext);
+					engine->decode(*plaintext, t);
+					cout << "index" << k+j << endl;
+					g0[k+j] = t[0];
+				}
+
+            } else {
+				for (j = 0; j < kad_len(a[i]); j++)
+					cout << "index2" << k << " " << kad_len(a[i]) << endl;
+					memcpy(&g0[k], a[i]->g, kad_len(a[i]) * sizeof(float));
+			}
 			k += kad_len(a[i]);
 		}
+	}
 	delta = (float*)calloc(n_var, sizeof(float));
 	for (k = 0; k < n_var; ++k) delta[k] = (float)kad_drand(0) * eps;
 	kad_add_delta(n, a, 1.0f, delta);
-	f_plus = *kad_eval_at(n, a, from);
+	f_plus_c = *kad_eval_at(n, a, from);
 	kad_add_delta(n, a, -2.0f, delta);
-	f_minus = *kad_eval_at(n, a, from);
+	f_minus_c = *kad_eval_at(n, a, from);
 	kad_add_delta(n, a, 1.0f, delta);
 	s0 = kad_sdot(n_var, g0, delta);
+	//get decrypted s1, firstly we need to sum the batch cost function. (model doesn't do that for efficientcy consideration.)
+	sum_vector(f_plus_c);
+	engine->decrypt(f_plus_c, *plaintext);
+	engine->decode(*plaintext, t);
+	f_plus = t[0];
+	sum_vector(f_minus_c);
+	engine->decrypt(f_minus_c, *plaintext);
+	engine->decode(*plaintext, t);
+	f_minus = t[0];
+	sum_vector(f0_c);
+	engine->decrypt(f0_c, *plaintext);
+	engine->decode(*plaintext, t);
+	f0 = t[0];
+
 	s1 = .5f * (f_plus - f_minus);
-	fprintf(stderr, "Gradient check -- %g <=> %g @ %g -- ", s0/eps, s1/eps, f0);
+	std::fprintf(stderr, "Gradient check -- %g <=> %g @ %g -- ", s0/eps, s1/eps, f0);
 	if (fabs(s1) >= rel * eps) {
 		rel_err = fabsf(fabsf(s0) - fabsf(s1)) / (fabsf(s0) + fabsf(s1));
 		p_m_err = fabsf(f_plus + f_minus - 2.0f * f0) / fabsf(f_plus - f_minus);
-		fprintf(stderr, "rel_err:%g p_m_err:%g -- ", rel_err, p_m_err);
-		if (rel_err >= rel && rel_err > p_m_err) fprintf(stderr, "failed\n");
-		else fprintf(stderr, "passed\n");
-	} else fprintf(stderr, "skipped\n");
-	free(delta); free(g0);
+		std::fprintf(stderr, "rel_err:%g p_m_err:%g -- ", rel_err, p_m_err);
+		if (rel_err >= rel && rel_err > p_m_err) std::fprintf(stderr, "failed\n");
+		else std::fprintf(stderr, "passed\n");
+	} else std::fprintf(stderr, "skipped\n");
+	std::free(delta); std::free(g0);
 }

@@ -30,8 +30,13 @@
 
 #define KAD_VERSION "r544"
 
-#include <stdio.h>
-#include <stdint.h>
+#include <cstdio>
+#include <cstdint>
+#include "SEALEngine.h"
+#include "SEALHE.h"
+
+using namespace std;
+using namespace hewrapper;
 
 #ifdef __STRICT_ANSI__
 #define inline
@@ -50,9 +55,31 @@
 #define KAD_CONST      0x2
 #define KAD_POOL       0x4
 #define KAD_SHARE_RNG  0x10 /* with this flag on, different time step shares the same RNG status after unroll */
+#define SEAL_CIPHER 0x20
+#define SEAL_PLAIN 0x40
+#define SEAL_COST 0x80
+
+/*
+ * gradient state:
+ *      1. grad clean: unused encrypted grad, to identify the 1st operation on grad.
+ *      2. grad encrypt: g_c is working
+ *      3. grad plain: g is working/prepared
+ *      ps: so, when KAD_GRAD_CIPHER & KAD_GRAD_PLAIN, the decrypted gradients are prepared.
+ */
+
+//#define KAD_GRAD_PLAIN 0x4  //whether plain gradient is applied
+
+//#define kad_is_grad_clean(p) ((p)->grad_flag & KAD_GRAD_CLEAN)
+//#define kad_is_grad_cipher(p) ((p)->grad_flag & KAD_GRAD_CIPHER)
+//#define kad_is_grad_plain(p) ((p)->grad_flag & KAD_GRAD_PLAIN)
+//#define kad_is_grad_decrypted(p) (kad_is_grad_cipher(p) && kad_is_grad_plain(p))
+
+//KAD_VAR : variables. (not neccesarily trainable variables, including intermediate variables.)
+//KAD_CIPHER : encrypted, using x_c, instead of x.
 
 #define kad_is_back(p)  ((p)->flag & KAD_VAR)
 #define kad_is_ext(p)   ((p)->n_child == 0)
+#define seal_is_encrypted(p) ((p)->flag & SEAL_CIPHER)
 #define kad_is_var(p)   (kad_is_ext(p) && kad_is_back(p))
 #define kad_is_const(p) (kad_is_ext(p) && ((p)->flag & KAD_CONST))
 #define kad_is_feed(p)  (kad_is_ext(p) && !kad_is_back(p) && !((p)->flag & KAD_CONST))
@@ -63,8 +90,26 @@
 #define kad_eval_enable(p) ((p)->tmp = 1)
 #define kad_eval_disable(p) ((p)->tmp = -1)
 
+extern std::shared_ptr<SEALEngine> engine;
+extern SEALPlaintext *plaintext;
+extern SEALCiphertext *ciphertext;
+extern vector<double> t;
+extern vector<double> test_t;   
+extern vector<double> truth_t;
+
+typedef struct branch_wave_t{
+    uint8_t wave_id; //identify wave for each branch.
+    SEALCiphertext *current_peak;
+    uint8_t n_wave;
+    uint8_t wave_max_size;
+    SEALCiphertext ** waves;
+} branch_wave_t;
+
 /* a node in the computational graph */
 typedef struct kad_node_t {
+    //bool x_reserved; /* whether save the forward wave (no one save the backward trend.)*/
+    //branch_wave_t* wave;       /*to save space with waves */
+    uint8_t     grad_flag;
 	uint8_t     n_d;            /* number of dimensions; no larger than KAD_MAX_DIM */
 	uint8_t     flag;           /* type of the node; see KAD_F_* for valid flags */
 	uint16_t    op;             /* operator; kad_op_list[op] is the actual function */
@@ -75,16 +120,15 @@ typedef struct kad_node_t {
 	int32_t     ext_label;      /* labels for external uses (not modified by the kad_* APIs) */
 	uint32_t    ext_flag;       /* flags for external uses (not modified by the kad_* APIs) */
 	float      *x;              /* value; allocated for internal nodes */
+    SEALCiphertext      *x_c;            /* encrypted value */
 	float      *g;              /* gradient; allocated for internal nodes */
+    SEALCiphertext      *g_c;            /* encrypted gradient */
 	void       *ptr;            /* for special operators that need additional parameters (e.g. conv2d) */
 	void       *gtmp;           /* temporary data generated at the forward pass but used at the backward pass */
 	struct kad_node_t **child;  /* operands/child nodes */
 	struct kad_node_t  *pre;    /* usually NULL; only used for RNN */
 } kad_node_t, *kad_node_p;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /**
  * Compile/linearize a computational graph
@@ -110,10 +154,10 @@ void kad_delete(int n, kad_node_t **a); /* deallocate a compiled/linearized grap
  * @return a pointer to the value (pointing to kad_node_t::x, so don't call
  *         free() on it!)
  */
-const float *kad_eval_at(int n, kad_node_t **a, int from);
+const SEALCiphertext *kad_eval_at(int n, kad_node_t **a, int from);
 
 void kad_eval_marked(int n, kad_node_t **a);
-int kad_sync_dim(int n, kad_node_t **v, int batch_size);
+//int kad_sync_dim(int n, kad_node_t **v, int batch_size);
 
 /**
  * Compute gradient
@@ -122,7 +166,7 @@ int kad_sync_dim(int n, kad_node_t **v, int batch_size);
  * @param a       list of nodes
  * @param from    the function node; must be a scalar (compute \nabla a[from])
  */
-void kad_grad(int n, kad_node_t **a, int from);
+void kad_grad(int n, kad_node_t **a, int from, bool add_noise);
 
 /**
  * Unroll a recurrent computation graph
@@ -134,10 +178,10 @@ void kad_grad(int n, kad_node_t **a, int from);
  *
  * @return list of nodes in the unrolled graph
  */
-kad_node_t **kad_unroll(int n_v, kad_node_t **v, int *new_n, int *len);
-int kad_n_pivots(int n_v, kad_node_t **v);
+//kad_node_t **kad_unroll(int n_v, kad_node_t **v, int *new_n, int *len);
+//int kad_n_pivots(int n_v, kad_node_t **v);
 
-kad_node_t **kad_clone(int n, kad_node_t **v, int batch_size);
+//kad_node_t **kad_clone(int n, kad_node_t **v, int batch_size);
 
 /* define a variable, a constant or a feed (placeholder in TensorFlow) */
 kad_node_t *kad_var(float *x, float *g, int n_d, ...); /* a variable; gradients to be computed; not unrolled */
@@ -164,9 +208,6 @@ kad_node_t *kad_ce_multi_weighted(kad_node_t *pred, kad_node_t *truth, kad_node_
 
 kad_node_t *kad_conv2d(kad_node_t *x, kad_node_t *w, int r_stride, int c_stride, int r_pad, int c_pad);             /* 2D convolution with weight matrix flipped */
 kad_node_t *kad_max2d(kad_node_t *x, int kernel_h, int kernel_w, int r_stride, int c_stride, int r_pad, int c_pad); /* 2D max pooling */
-kad_node_t *kad_conv1d(kad_node_t *x, kad_node_t *w, int stride, int pad);  /* 1D convolution with weight flipped */
-kad_node_t *kad_max1d(kad_node_t *x, int kernel_size, int stride, int pad); /* 1D max pooling */
-kad_node_t *kad_avg1d(kad_node_t *x, int kernel_size, int stride, int pad); /* 1D average pooling */
 
 kad_node_t *kad_dropout(kad_node_t *x, kad_node_t *r);                      /* dropout at rate r */
 kad_node_t *kad_sample_normal(kad_node_t *x);                               /* f(x) = x * r, where r is drawn from a standard normal distribution */
@@ -204,6 +245,7 @@ kad_node_t *kad_switch(int n, kad_node_t **p);                      /* manually 
 
 /* miscellaneous operations on a compiled graph */
 int kad_size_var(int n, kad_node_t *const* v);   /* total size of all variables */
+int kad_size_encrypted_var(int n, kad_node_t *const* v);
 int kad_size_const(int n, kad_node_t *const* v); /* total size of all constants */
 
 /* graph I/O */
@@ -216,16 +258,15 @@ void kad_srand(void *d, uint64_t seed);
 uint64_t kad_rand(void *d);
 double kad_drand(void *d);
 double kad_drand_normal(void *d);
+
 void kad_saxpy(int n, float a, const float *x, float *y);
+void kad_saxpy(int n, float a, const SEALCiphertext *x, SEALCiphertext *y);
+void kad_saxpy(int n, SEALCiphertext &a, const SEALCiphertext *x, SEALCiphertext *y);
 
 /* debugging routines */
 void kad_trap_fe(void); /* abort on divide-by-zero and NaN */
 void kad_print_graph(FILE *fp, int n, kad_node_t **v);
 void kad_check_grad(int n, kad_node_t **a, int from);
-
-#ifdef __cplusplus
-}
-#endif
 
 #define KAD_ALLOC      1
 #define KAD_FORWARD    2
@@ -234,6 +275,7 @@ void kad_check_grad(int n, kad_node_t **a, int from);
 
 typedef int (*kad_op_f)(kad_node_t*, int);
 extern kad_op_f kad_op_list[KAD_MAX_OP];
+
 extern char *kad_op_name[KAD_MAX_OP];
 
 static inline int kad_len(const kad_node_t *p) /* calculate the size of p->x */
