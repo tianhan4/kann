@@ -177,10 +177,10 @@ float kann_grad_clip(float thres, int n, float *g);
 
 /* common layers */
 kad_node_t *kann_layer_input(int n1);
-kad_node_t *kann_layer_dense(kad_node_t *in, int n1, bool w_is_encrypted, bool b_is_encrypted);
+kad_node_t *kann_layer_dense(kad_node_t *in, int n1, bool w_is_encrypted = true, bool b_is_encrypted = true);
 kad_node_t *kann_layer_dropout(kad_node_t *t, float r);
 //kad_node_t *kann_layer_layernorm(kad_node_t *in);
-kad_node_t *kann_layer_conv2d(kad_node_t *in, int n_flt, int k_rows, int k_cols, int stride_r, int stride_c, int pad_r, int pad_c);
+kad_node_t *kann_layer_conv2d(kad_node_t *in, int n_flt, int k_rows, int k_cols, int stride_r, int stride_c, int pad_r, int pad_c, bool is_encrypted = true);
 kad_node_t *kann_layer_cost(kad_node_t *t, int n_out, int cost_type, bool is_w_encrypted = true, bool is_b_encrypted = true);
 
 kad_node_t *kann_new_leaf(uint8_t flag, float x0_01, bool is_encrypted, int n_d, ...); /* flag can be KAD_CONST or KAD_VAR */

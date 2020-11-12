@@ -516,7 +516,6 @@ void kad_delete(int n, kad_node_t **a)
 	int i;
 	for (i = 0; i < n; ++i) {
 		kad_node_t *p = a[i];
-		cout << "delete node " << i << endl;
 		if (p->n_child) {
 			// All internal nodes are encrypted.
 			delete[] p->x_c, p->g_c, p->g; 
@@ -638,17 +637,28 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 					assert(false);
 				}else{
 					for(j = 0; j < kad_len(a[i]); j++){
-						engine->decrypt(a[i]->g_c[j], *plaintext);
-						engine->decode(*plaintext, t);
-						//here is where noise should be added.
-						a[i]->g[j] = std::accumulate(t.begin(), t.end(), 0);
+						if (a[i]->g_c[j].clean()) {
+							a[i]->g[j] = 0.0;
+						}else{
+							engine->decrypt(a[i]->g_c[j], *plaintext);
+							engine->decode(*plaintext, t);
+							//here is where noise should be added.
+							a[i]->g[j] = std::accumulate(t.begin(), t.end(), 0);		
+						}
 					}
 				}
 			}
 			else{
-				for(j = 0; j < kad_len(a[i]); j++)
-					// maybe faster on the client side to decrypt+sum+encrypte?
-					hewrapper::sum_vector(a[i]->g_c[j]);
+				for(j = 0; j < kad_len(a[i]); j++){
+					if (a[i]->g_c[j].clean()){
+						continue;
+					}else{
+						// maybe faster on the client side to decrypt+sum+encrypte?
+						hewrapper::sum_vector(a[i]->g_c[j]);
+					}
+
+				}
+
 			}
 		}
 	}
@@ -1633,8 +1643,9 @@ int kad_op_ce_bin(kad_node_t *p, int action)
             engine->decode(*plaintext, test_t);
             engine->decrypt(y0->x_c[0], *plaintext);
             engine->decode(*plaintext, truth_t);
-            for (i=0; i<truth_t.size(); i++)
-                test_t[i] = (-log(test_t[i])*truth_t[i] + (truth_t[i]-1)*log(1.-test_t[i]))/(float)(truth_t.size());
+            for (i=0; i<truth_t.size(); i++){
+				test_t[i] = (-log(test_t[i]+1e-6)*truth_t[i] + (truth_t[i]-1)*log(1e-6 + 1.-test_t[i]))/(double)(truth_t.size());
+			}
             engine->encode(test_t, *plaintext);
             engine->encrypt(*plaintext, p->x_c[0]);
         }
@@ -1648,7 +1659,7 @@ int kad_op_ce_bin(kad_node_t *p, int action)
             engine->decrypt(y0->x_c[0], *plaintext);
             engine->decode(*plaintext, truth_t);
             for (i=0; i<truth_t.size(); i++)
-                test_t[i] = p->g[0]*(-1./test_t[i]*truth_t[i] + (1-truth_t[i])*1./(1.-test_t[i]))/(float)(truth_t.size());
+                test_t[i] = p->g[0]*(-1./(test_t[i]+1e-6)*truth_t[i] + (1-truth_t[i])*1./(1.-test_t[i]+1e-6))/(float)(truth_t.size());
             engine->encode(test_t, *plaintext);
             seal_add_inplace(y1->g_c[0], *plaintext);
         }
@@ -1670,7 +1681,6 @@ int kad_op_ce_multi(kad_node_t *p, int action)
 	kad_node_t *y0 = p->child[1]; /* truth */
 	kad_node_t *c = 0;
 	int i, j, n1, d0;
-	int batch_size = y1->x_c[0].size();
 	n1 = y0->d[y0->n_d - 1];
 	//d0 = kad_len(y0) / n1;
     // this third child is for masking.
@@ -1685,6 +1695,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
         if (remote){
             assert(false);
         }else{
+			int batch_size = y1->x_c[0].size();
             if (c == 0) {
                 vector<double> cost(batch_size, 0.);
                 for (i = 0; i < n1; ++i){
@@ -1693,7 +1704,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t);
                     for (j=0; j<batch_size;j++)
-                        cost[j] += -log(test_t[j])*truth_t[j]/(float)(batch_size);
+                        cost[j] += -log(test_t[j]+1e-6)*truth_t[j]/(float)(batch_size);
                 }
                 engine->encode(cost, *plaintext);
                 engine->encrypt(*plaintext, p->x_c[0]);
@@ -1705,7 +1716,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t);
                     for (j=0; j<batch_size;j++)
-                        cost[j] += -c->x[i]*log(test_t[j])*truth_t[j]/(float)(batch_size);
+                        cost[j] += -c->x[i]*log(test_t[j]+1e-6)*truth_t[j]/(float)(batch_size);
                 }
                 engine->encode(cost, *plaintext);
                 engine->encrypt(*plaintext, p->x_c[0]);
@@ -1715,6 +1726,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
         if (remote){
             assert(false);
         }else{
+			int batch_size = y1->x_c[0].size();
             float coeff = p->g[0] / (float)(batch_size);
             if (c == 0) {
                 for (i = 0; i < n1; ++i){
@@ -1723,7 +1735,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t);
                     for (j = 0; j < batch_size; j++)
-                        test_t[j] = -coeff * truth_t[j] * 1.0 / test_t[j];
+                        test_t[j] = -coeff * truth_t[j] * 1.0 / (test_t[j]+1e-6);
                     engine->encode(test_t, *plaintext);
                     seal_add_inplace(y1->g_c[i], *plaintext);
                 }
@@ -1734,7 +1746,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t);
                     for (j=0; j<batch_size; j++)
-                        test_t[j] = -coeff * c->x[i] * truth_t[j] * 1.0 / test_t[j];
+                        test_t[j] = -coeff * c->x[i] * truth_t[j] * 1.0 / (test_t[j]+1e-6);
                     engine->encode(test_t, *plaintext);
                 	seal_add_inplace(y1->g_c[i], *plaintext);
                 }
@@ -1814,16 +1826,20 @@ int kad_op_sigm(kad_node_t *p, int action)
             assert(false);
         }
         else{
-            for (i=0; i<n; i++){
-                engine->decrypt(p->x_c[i], *plaintext);
-                engine->decode(*plaintext, test_t);
-                engine->decrypt(p->g_c[i], *plaintext);
-                engine->decode(*plaintext, t);
-                for (j = 0; j < t.size(); ++j)
-                    test_t[j] = t[j] * (test_t[j] * (1. - test_t[j]));
-                engine->encode(test_t, *plaintext);
-                seal_add_inplace(q->g_c[i], *plaintext);
-            }
+			if(p->g_c[i].clean()){
+				q->g_c[i].clean() = true;
+			}else{			
+				for (i=0; i<n; i++){
+					engine->decrypt(p->x_c[i], *plaintext);
+					engine->decode(*plaintext, test_t);
+					engine->decrypt(p->g_c[i], *plaintext);
+					engine->decode(*plaintext, t);
+					for (j = 0; j < t.size(); ++j)
+						test_t[j] = t[j] * (test_t[j] * (1. - test_t[j]));
+					engine->encode(test_t, *plaintext);
+					seal_add_inplace(q->g_c[i], *plaintext);
+				}
+			}
         }
 	}
 	return 0;
@@ -1860,16 +1876,20 @@ int kad_op_tanh(kad_node_t *p, int action)
             assert(false);
         }
         else{
-            for (i=0; i<n; i++){
-                engine->decrypt(p->x_c[i], *plaintext);
-                engine->decode(*plaintext, test_t);
-                engine->decrypt(p->g_c[i], *plaintext);
-                engine->decode(*plaintext, t);
-                for (j = 0; j < t.size(); ++j)
-                    test_t[j] = t[j] * (1. - test_t[j] * test_t[j]);
-                engine->encode(test_t, *plaintext);
-                seal_add_inplace(q->g_c[i], *plaintext);
-            }
+			if(p->g_c[i].clean()){
+				q->g_c[i].clean() = true;
+			}else{			
+				for (i=0; i<n; i++){
+					engine->decrypt(p->x_c[i], *plaintext);
+					engine->decode(*plaintext, test_t);
+					engine->decrypt(p->g_c[i], *plaintext);
+					engine->decode(*plaintext, t);
+					for (j = 0; j < t.size(); ++j)
+						test_t[j] = t[j] * (1. - test_t[j] * test_t[j]);
+					engine->encode(test_t, *plaintext);
+					seal_add_inplace(q->g_c[i], *plaintext);
+				}
+			}
         }
 	}
 	return 0;
@@ -1901,15 +1921,20 @@ int kad_op_relu(kad_node_t *p, int action)
         }
         else{
             for (i=0; i<n; i++){
-                engine->decrypt(p->x_c[i], *plaintext);
-                engine->decode(*plaintext, test_t);
-                engine->decrypt(p->g_c[i], *plaintext);
-                engine->decode(*plaintext, t);
-                for (j = 0; j < t.size(); ++j)
-                    test_t[j] = test_t[j] > 0.0f? t[j] : 0.0f;
-                engine->encode(test_t, *plaintext);
-				engine->encrypt(*plaintext, *ciphertext);
-                seal_add_inplace(q->g_c[i], *ciphertext);
+				if(p->g_c[i].clean()){
+					q->g_c[i].clean() = true;
+				}else{
+					engine->decrypt(p->x_c[i], *plaintext);
+					engine->decode(*plaintext, test_t);
+					engine->decrypt(p->g_c[i], *plaintext);
+					engine->decode(*plaintext, t);
+					for (j = 0; j < t.size(); ++j)
+						test_t[j] = test_t[j] > 0.0f? t[j] : 0.0f;
+					engine->encode(test_t, *plaintext);
+					engine->encrypt(*plaintext, *ciphertext);
+					seal_add_inplace(q->g_c[i], *ciphertext);					
+				}
+
             }
         }
 	}
@@ -1941,16 +1966,20 @@ int kad_op_sin(kad_node_t *p, int action)
             assert(false);
         }
         else{
-            for (i=0; i<n; i++){
-                engine->decrypt(q->x_c[i], *plaintext);
-                engine->decode(*plaintext, test_t);
-                engine->decrypt(p->g_c[i], *plaintext);
-                engine->decode(*plaintext, t);
-                for (j = 0; j < t.size(); ++j)
-                    test_t[j] = t[j]*cosf(test_t[j]);
-                engine->encode(test_t, *plaintext);
-                seal_add_inplace(q->g_c[i], *plaintext);
-            }
+			if(p->g_c[i].clean()){
+				q->g_c[i].clean() = true;
+			}else{
+				for (i=0; i<n; i++){
+					engine->decrypt(q->x_c[i], *plaintext);
+					engine->decode(*plaintext, test_t);
+					engine->decrypt(p->g_c[i], *plaintext);
+					engine->decode(*plaintext, t);
+					for (j = 0; j < t.size(); ++j)
+						test_t[j] = t[j]*cosf(test_t[j]);
+					engine->encode(test_t, *plaintext);
+					seal_add_inplace(q->g_c[i], *plaintext);
+				}
+			}
         }
 	}
 	return 0;
@@ -2004,12 +2033,12 @@ int kad_op_softmax(kad_node_t *p, int action)
             vector<vector<double>> raw_value(n1, vector<double>(batch_size, 0.));
             vector<vector<double>> raw_gradient(n1, vector<double>(batch_size, 0.));
             for (i = 0; i < n1; i++){
-                engine->decrypt(q->x_c[i],*plaintext);
+                engine->decrypt(p->x_c[i],*plaintext);
                 engine->decode(*plaintext,raw_value[i]);
                 engine->decrypt(p->g_c[i],*plaintext);
                 engine->decode(*plaintext,raw_gradient[i]);
             }
-			// for x0, the gradient is g1*y1*(1-y1)-g2*y1*y2-g3*y1*y3 = y1(g1-(\Sigma_i y_i*g_i))
+			// for xi, the gradient is g1*y1*(1-y1)-g2*y1*y2-g3*y1*y3 = yi(gi-(\Sigma_i y_i*g_i))
             for (j = 0; j < batch_size; ++j){
                 for (i = 0, s = 0.0f; i < n1; i++)
                     s += raw_gradient[i][j] * raw_value[i][j];
@@ -2178,7 +2207,9 @@ static void conv_rot180(int d0, int d1, SEALCiphertext *x) /* rotate/reverse a w
 			for (j = 0; j < _pn; ++j, xl += _stride) _t[j] = *xl; \
 			kad_saxpy(_pn, _ww[l], _t, _yy); \
 		} \
-	} else for (l = 0; l < _wn; ++l) kad_saxpy(_pn, _ww[l], &_xx[l - _pad], _yy); \
+	} else for (l = 0; l < _wn; ++l) { \
+		kad_saxpy(_pn, _ww[l], &_xx[l - _pad], _yy); \
+	} \
 } while (0)
 
 #define process_row_back_x(_xx, _ww, _yy, _wn, _pn, _stride, _pad, _t) do { \
@@ -2234,19 +2265,25 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
 								x_padded[aux[1].pad[0] + j] = _xx[j]; \
                             _xx = x_padded + aux[1].pad[0]; \
                         } \
-                        _row_func(_xx, _ww, _yy, w->d[3], p->d[2], aux[1].stride, aux[1].pad[0], (_tmp)); \
+						_row_func(_xx, _ww, _yy, w->d[3], p->d[2], aux[1].stride, aux[1].pad[0], (_tmp)); \
                     } /* ~i */ \
                 } /* ~k, c0, c1, n */ \
 	} while (0)
 
-    int l;
+    int l ,i ;
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0], *w = p->child[1];
-	SEALCiphertext *t = 0, *q1 = 0, *w1 = 0, *x_padded = 0;
+	SEALCiphertext *t1 = 0, *q1 = 0, *w1 = 0, *x_padded = 0;
 
 	if (action == KAD_FORWARD || action == KAD_BACKWARD) { /* allocate working space */
-        t = (SEALCiphertext *)malloc(p->d[2] * sizeof(SEALCiphertext));
-        x_padded = aux[1].pad[0] + aux[1].pad[1] > 0? (SEALCiphertext*)calloc(q->d[2] + aux[1].pad[0] + aux[1].pad[1], sizeof(SEALCiphertext)) : 0;
+        t1 = new SEALCiphertext[p->d[2]];
+        x_padded = aux[1].pad[0] + aux[1].pad[1] > 0? new SEALCiphertext[q->d[2] + aux[1].pad[0] + aux[1].pad[1]] : 0;
+		if(x_padded){
+			for (i = 0 ; i < q->d[2] + aux[1].pad[0] + aux[1].pad[1]; i ++){
+				x_padded[i].init(engine);
+				x_padded[i].clean() = true;
+			}
+		}
 	}
 	if (action == KAD_SYNC_DIM) {
 		if (q->n_d != 3 || w->n_d != 4) return -1;
@@ -2256,38 +2293,51 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
 	} else if (action == KAD_FORWARD) {
         if(seal_is_encrypted(w)){
 		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+			for (l = 0; l < kad_len(q); l++)
+                if(!q->x_c[l].clean()){
+					engine->decrypt(q->x_c[l], *plaintext);
+					engine->decode(*plaintext, truth_t);
+				}
+			for (l = 0; l < kad_len(w); l++)
+                if(!w->x_c[l].clean()){
+					engine->decrypt(w->x_c[l], *plaintext);
+					engine->decode(*plaintext, truth_t);
+				}
             for (l = 0; l < kad_len(p); l++)
                 p->x_c[l].clean() = true;
-            conv2d_loop1(q->x_c, w->x_c, p->x_c, t, process_row_for);
+            conv2d_loop1(q->x_c, w->x_c, p->x_c, t1, process_row_for);
             conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+			
         }else{
 		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
             for (l = 0; l < kad_len(p); l++)
                 p->x_c[l].clean() = true;
-            conv2d_loop1(q->x_c, w->x, p->x_c, t, process_row_for);
+            conv2d_loop1(q->x_c, w->x, p->x_c, t1, process_row_for);
             conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 		}
 	} else if (action == KAD_BACKWARD) {
 		if (kad_is_back(p->child[0])) { /* backprop to the input array */
             if(seal_is_encrypted(w)){
                 conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
-                conv2d_loop1(q->g_c, w->x_c, p->g_c, t, process_row_back_x);
+                conv2d_loop1(q->g_c, w->x_c, p->g_c, t1, process_row_back_x);
                 conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
 
             }else{
                 conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
-                conv2d_loop1(q->g_c, w->x, p->g_c, t, process_row_back_x);
+                conv2d_loop1(q->g_c, w->x, p->g_c, t1, process_row_back_x);
                 conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 
             }
 		}
 		if (kad_is_back(p->child[1])) { /* backprop to the weight matrix */
             conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
-            conv2d_loop1(q->x_c, w->g_c, p->g_c, t, process_row_back_w);
+            conv2d_loop1(q->x_c, w->g_c, p->g_c, t1, process_row_back_w);
             conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
 		}
 	}
-	std::free(t); std::free(q1); std::free(w1); std::free(x_padded);
+	std::free(q1); std::free(w1); 
+	delete[] x_padded;
+	delete[] t1;
 	return 0;
 }
 
@@ -2650,13 +2700,11 @@ void kad_check_grad(int n, kad_node_t **a, int from)
                     // should be size 1
 					engine->decrypt(a[i]->g_c[j], *plaintext);
 					engine->decode(*plaintext, t);
-					cout << "index" << k+j << endl;
 					g0[k+j] = t[0];
 				}
 
             } else {
 				for (j = 0; j < kad_len(a[i]); j++)
-					cout << "index2" << k << " " << kad_len(a[i]) << endl;
 					memcpy(&g0[k], a[i]->g, kad_len(a[i]) * sizeof(float));
 			}
 			k += kad_len(a[i]);

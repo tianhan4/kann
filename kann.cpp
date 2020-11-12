@@ -373,11 +373,9 @@ kad_node_t *kann_new_leaf_array(int *offset, kad_node_p *par, uint8_t flag, floa
 		p->x_c = new SEALCiphertext[len];
 		if (p->n_d <= 1) {
 			for (i = 0; i < len; ++i){
-cout << "init with :" << 3.0 << endl;
 p->x_c[i].init(engine); 
 engine->encode(3.0, *plaintext);
 engine->encrypt(*plaintext, p->x_c[i]);
-cout << "ciphertext in leaf:" << p->x_c[i].size() << endl;
 				/**
 				p->x_c[i].init(engine); 
 				engine->encode(x0_01, *plaintext);
@@ -388,10 +386,8 @@ cout << "ciphertext in leaf:" << p->x_c[i].size() << endl;
 		} else {
 for (i = 0; i < len; ++i){
 	p->x_c[i].init(engine);
-	cout << "init with :" << 2.0 << endl;
 	engine->encode(2.0, *plaintext);
 	engine->encrypt(*plaintext, p->x_c[i]);
-	cout << "ciphertext in leaf:" << p->x_c[i].size() << endl;
 }
 			/**
 			double sdev_inv;
@@ -475,7 +471,7 @@ kad_node_t *kann_new_weight(int n_row, int n_col, bool is_encrypted) { return ka
 kad_node_t *kann_new_vec(int n, float x, bool is_encrypted) { return kann_new_leaf(KAD_VAR, x, is_encrypted, 1, n); }
 kad_node_t *kann_new_bias(int n, bool is_encrypted) { return kann_new_vec(n, 0.0f, is_encrypted); }
 kad_node_t *kann_new_weight_conv2d(int n_out, int n_in, int k_row, int k_col, bool is_encrypted) { return kann_new_leaf(KAD_VAR, 0.0f, is_encrypted, 4, n_out, n_in, k_row, k_col); }
-kad_node_t *kann_new_weight_conv1d(int n_out, int n_in, int kernel_len, bool is_encrypted) { return kann_new_leaf(KAD_VAR, 0.0f, is_encrypted, 3, n_out, n_in, kernel_len); }
+//kad_node_t *kann_new_weight_conv1d(int n_out, int n_in, int kernel_len, bool is_encrypted) { return kann_new_leaf(KAD_VAR, 0.0f, is_encrypted, 3, n_out, n_in, kernel_len); }
 
 kad_node_t *kann_layer_input(int n1)
 {
@@ -498,7 +494,7 @@ static kad_node_t *kann_cmul_norm(kad_node_t *x, kad_node_t *w)
 kad_node_t *kann_layer_conv2d(kad_node_t *in, int n_flt, int k_rows, int k_cols, int stride_r, int stride_c, int pad_r, int pad_c, bool is_encrypted)
 {
 	kad_node_t *w;
-	w = kann_new_weight_conv2d(n_flt, in->d[1], k_rows, k_cols, is_encrypted);
+	w = kann_new_weight_conv2d(n_flt, in->d[0], k_rows, k_cols, is_encrypted);
 	return kad_conv2d(in, w, stride_r, stride_c, pad_r, pad_c);
 }
 
