@@ -93,6 +93,7 @@ using namespace hewrapper;
 extern std::shared_ptr<SEALEngine> engine;
 extern SEALPlaintext *plaintext;
 extern SEALCiphertext *ciphertext;
+extern SEALCiphertext *zero;
 extern vector<double> t;
 extern vector<double> test_t;   
 extern vector<double> truth_t;

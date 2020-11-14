@@ -218,6 +218,9 @@ int main(int argc, char *argv[])
     cout << "scale: 2^" << standard_scale << endl;
 	plaintext = new SEALPlaintext(engine);
 	ciphertext = new SEALCiphertext(engine);
+	engine->zero = new SEALCiphertext(engine);
+	engine->encode(0, *plaintext);
+	engine->encrypt(*plaintext, *(engine->zero));
 	//1. read the model and data
 	kann_srand(seed);
 	in = kann_data_read(argv[optind]);

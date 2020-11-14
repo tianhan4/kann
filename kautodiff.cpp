@@ -18,6 +18,7 @@ bool remote = false;
 std::shared_ptr<SEALEngine> engine;
 SEALPlaintext *plaintext;
 SEALCiphertext *ciphertext;
+SEALCiphertext *zero;
 vector<double> t;
 vector<double> test_t;   
 vector<double> truth_t;
