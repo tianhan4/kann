@@ -1,3 +1,4 @@
 [submodule "HEWrapper"]
 	path = HEWrapper
-	url = https://github.com/tianhan4/HEWrapper.git
+    url = https://github.com/tianhan4/HEWrapper.git
+    branch = master
