@@ -2294,16 +2294,6 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
 	} else if (action == KAD_FORWARD) {
         if(seal_is_encrypted(w)){
 		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
-			for (l = 0; l < kad_len(q); l++)
-                if(!q->x_c[l].clean()){
-					engine->decrypt(q->x_c[l], *plaintext);
-					engine->decode(*plaintext, truth_t);
-				}
-			for (l = 0; l < kad_len(w); l++)
-                if(!w->x_c[l].clean()){
-					engine->decrypt(w->x_c[l], *plaintext);
-					engine->decode(*plaintext, truth_t);
-				}
             for (l = 0; l < kad_len(p); l++)
                 p->x_c[l].clean() = true;
             conv2d_loop1(q->x_c, w->x_c, p->x_c, t1, process_row_for);

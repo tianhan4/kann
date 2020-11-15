@@ -242,6 +242,7 @@ int main(int argc, char *argv[])
     engine->zero = new SEALCiphertext(engine);
     engine->encode(0, *plaintext);
     engine->encrypt(*plaintext, *(engine->zero));
+    engine->lazy_mode() = true;
     //1. read the model and data
     kann_srand(seed);
     in = kann_data_read(argv[optind]);
