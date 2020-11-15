@@ -412,8 +412,8 @@ static void kad_allocate_internal(int n, kad_node_t **v)
 		kad_node_t *p = v[i];
 		if (p->n_child == 0) continue;
 		if(p->x_c) delete[] p->x_c;
-		if (p->op == ){
-			
+		if (p->op == 8){
+			p->x_c = p->child[0]->x_c;  //reuse
 		}else{
         	p->x_c = new SEALCiphertext[kad_len(p)];
 		}
@@ -421,7 +421,8 @@ static void kad_allocate_internal(int n, kad_node_t **v)
 			p->x_c[j].init(engine);
         if (kad_is_back(p)) {
 			if(p->g_c) delete[] p->g_c;
-			p->g_c = new SEALCiphertext[kad_len(p)];
+			if(p->op == 1 && p->op == 17) p->g_c = p->x_c;
+			else p->g_c = new SEALCiphertext[kad_len(p)];
 			for(j = 0; j< kad_len(p); j++)
 				p->g_c[j].init(engine);
 			if(p->g) delete[] p->g;	
@@ -523,9 +524,11 @@ void kad_delete(int n, kad_node_t **a)
 		kad_node_t *p = a[i];
 		if (p->n_child) {
 			// All internal nodes are encrypted.
-			delete[] p->x_c;
-			delete[] p->g_c;
-			delete[] p->g; 
+			if(p->op!=8)delete[] p->x_c;
+			if(p->op!=1 && p->op!=17){
+				delete[] p->g_c;
+			}
+			if(p->g) delete[] p->g;
 		}
 		std::free(p->child); 
 		std::free(p->ptr); 
@@ -1160,12 +1163,12 @@ int kad_op_cmul(kad_node_t *p, int action)
         else
 			kad_sgemm_simple(0, 1, n_a_row, n_b_row, n_col, q[0]->x_c, q[1]->x, p->x_c); /* Y = X * trans(W) */
 	} else if (action == KAD_BACKWARD) {
+		if (kad_is_back(q[1]) && q[0]->x_c)
+			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c); /* G_w <- trans(G_y) * X */
 		if (kad_is_back(q[0]) && (q[1]->x))
 			kad_sgemm_simple(0, 0, n_a_row, n_col, n_b_row, p->g_c, q[1]->x, q[0]->g_c); /* G_x <- G_y * W */
         else if (kad_is_back(q[0]) && seal_is_encrypted(q[1]))
 			kad_sgemm_simple(0, 0, n_a_row, n_col, n_b_row, p->g_c, q[1]->x_c, q[0]->g_c); /* G_x <- G_y * W */
-		if (kad_is_back(q[1]) && q[0]->x_c)
-			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c); /* G_w <- trans(G_y) * X */
 
 	}
 	return 0;
@@ -1195,13 +1198,13 @@ int kad_op_matmul(kad_node_t *p, int action) /* TODO: matmul and cmul have diffe
         else
 			kad_sgemm_simple(0, 0, n_a_row, n_b_col, n_a_col, q[0]->x_c, q[1]->x, p->x_c); /* Y = X * W */
 	} else if (action == KAD_BACKWARD) {
+		if (kad_is_back(q[1]) && q[0]->x_c)
+			kad_sgemm_simple(1, 0, n_b_row, n_b_col, n_a_row, q[0]->x_c, p->g_c, q[1]->g_c); /* G_y <- trans(A) * G_y */
 		if (kad_is_back(q[0]) && q[1]->x)
 			kad_sgemm_simple(0, 1, n_a_row, n_a_col, n_b_col, p->g_c, q[1]->x, q[0]->g_c); /* G_x <- G_y * trans(W) */
         else if (kad_is_back(q[0]) && seal_is_encrypted(q[1]))
 			kad_sgemm_simple(0, 1, n_a_row, n_a_col, n_b_col, p->g_c, q[1]->x_c, q[0]->g_c); /* G_x <- G_y * trans(W) */
         //dont really see the diff between x_c existing and is_encrypted being true.
-		if (kad_is_back(q[1]) && q[0]->x_c)
-			kad_sgemm_simple(1, 0, n_b_row, n_b_col, n_a_row, q[0]->x_c, p->g_c, q[1]->g_c); /* G_y <- trans(A) * G_y */
 	}
 	return 0;
 }
@@ -2342,7 +2345,6 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
             conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
 		}
 	}
-	std::free(q1); std::free(w1); 
 	delete[] x_padded;
 	delete[] t1;
 	return 0;
