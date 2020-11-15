@@ -500,8 +500,8 @@ kad_node_t *kann_layer_conv2d(kad_node_t *in, int n_flt, int k_rows, int k_cols,
 }
 
 
-kad_node_t *kann_layer_cost(kad_node_t *t, int n_out, int cost_type, bool is_w_encrypted, bool is_b_encrypted)
 {
+kad_node_t *kann_layer_cost(kad_node_t *t, int n_out, int cost_type, bool is_w_encrypted, bool is_b_encrypted)
 	kad_node_t *cost = 0, *truth = 0;
 	assert(cost_type == KANN_C_CEB || cost_type == KANN_C_CEM || cost_type == KANN_C_MSE);
 	t = kann_layer_dense(t, n_out, is_w_encrypted, is_b_encrypted);
