@@ -18,7 +18,7 @@ static kann_t *model_gen(int n_in, int n_out, int loss_type, int n_h_layers, int
 	kad_node_t *t;
 	t = kann_layer_input(n_in);
 	for (i = 0; i < n_h_layers; ++i)
-		t = kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted, b_is_encrypted));
+		t = kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted));
 		//t = kann_layer_dropout(kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted, b_is_encrypted)), h_dropout);
 		 //better put the last layer all encrypted. For we can infer the i-1 activations from the gradients of w, due to the situation where only 1 node output.
 	return kann_new(kann_layer_cost(t, n_out, loss_type, true, true), 0);
@@ -150,7 +150,7 @@ int main(int argc, char *argv[])
 {
 	//0. set the environment
 	int max_epoch = 50, mini_size = 64, max_drop_streak = 10, loss_type = KANN_C_CEB;
-	int i, j, k, c, n_h_neurons = 64, n_h_layers = 1, seed = 11, n_threads = 1;
+	int i, j, k, c, z = 0, n_h_neurons = 64, n_h_layers = 1, seed = 11, n_threads = 1;
 	int total_samples;
 	kann_data_t *in = 0;
 	kann_data_t *out = 0;
@@ -160,10 +160,11 @@ int main(int argc, char *argv[])
     chrono::high_resolution_clock::time_point time_start, time_end;
 	chrono::microseconds inference_time(0);
 	chrono::microseconds training_step_time(0);
+	chrono::microseconds cnn_training_step_time(0);
 	chrono::microseconds training_time(0);
 	cout << "start reading parameters" << endl;
 	cout << "argc:" << argc << endl;
-	while ((c = getopt(argc, argv, "n:l:s:r:m:B:d:v:M")) >= 0) {
+	while ((c = getopt(argc, argv, "n:l:s:r:m:B:d:v:M:z:")) >= 0) {
 		if (c == 'n') n_h_neurons = atoi(optarg);
 		else if (c == 'l') n_h_layers = atoi(optarg);
 		else if (c == 's') seed = atoi(optarg);
@@ -175,6 +176,7 @@ int main(int argc, char *argv[])
 		else if (c == 'd') h_dropout = atof(optarg);
 		else if (c == 'v') frac_val = atof(optarg);
 		else if (c == 'M') loss_type = KANN_C_CEM;
+		else if (c == 'z') z = atoi(optarg);
 		//else if (c == 't') n_threads = atoi(optarg);
 	}
 	//argc - optind < 1, which means no more other arguments followed, i.e., training feature/label files missing.
@@ -191,6 +193,7 @@ int main(int argc, char *argv[])
 		fprintf(fp, "    -d FLOAT    dropout at the hidden layer(s) [%g]\n", h_dropout);
 		fprintf(fp, "    -M          use multi-class cross-entropy (binary by default)\n");
 		fprintf(fp, "  Model training:\n");
+		fprintf(fp, "    -z bool   lazy mode\n", z);
 		fprintf(fp, "    -r FLOAT    learning rate [%g]\n", lr);
 		fprintf(fp, "    -m INT      max number of epochs [%d]\n", max_epoch);
 		fprintf(fp, "    -B INT      mini-batch size [%d]\n", mini_size);
@@ -221,6 +224,7 @@ int main(int argc, char *argv[])
 	engine->zero = new SEALCiphertext(engine);
 	engine->encode(0, *plaintext);
 	engine->encrypt(*plaintext, *(engine->zero));
+	engine->lazy_mode() = z;
 	//1. read the model and data
 	kann_srand(seed);
 	in = kann_data_read(argv[optind]);
@@ -347,10 +351,9 @@ total_samples = 128;
 	kad_eval_at(ann->n, ann->v, i_cost);
 	time_end = chrono::high_resolution_clock::now();
 	cout << "after evaluation." << endl;
-	print_model(ann, i_cost, 0);
+	//print_model(ann, i_cost, 0);
 
 	inference_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-    cout << "Inference time:" << inference_time.count() << "microseconds" << endl;
 
 
 	//4.BP: training step
@@ -366,8 +369,7 @@ total_samples = 128;
 	time_end = chrono::high_resolution_clock::now();
 	i_cost = kann_find(ann, KANN_F_COST, 0);
 	training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-	print_model(ann, i_cost, 1);
-    cout << "Training step time:" << training_step_time.count() << "microseconds" << endl;
+	//print_model(ann, i_cost, 1);
 
 	// 5. check the gradients
 	kad_check_grad(ann->n, ann->v, i_cost);
@@ -459,14 +461,16 @@ total_samples = 128;
 	train_cost = kann_cost(cnn_ann, 0, 1);
 	time_end = chrono::high_resolution_clock::now();
 	i_cost = kann_find(cnn_ann, KANN_F_COST, 0);
-	training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-	print_model(cnn_ann, i_cost, 1);
-    cout << "CNN Training step time:" << training_step_time.count() << "microseconds" << endl;
+	cnn_training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
+	//print_model(cnn_ann, i_cost, 1);
 
 	// 5.6 check cnn gradients
 	kad_check_grad(cnn_ann->n, cnn_ann->v, i_cost);
 
 
+    cout << "Inference time:" << inference_time.count() << "microseconds" << endl;
+    cout << "Training step time:" << training_step_time.count() << "microseconds" << endl;
+    cout << "CNN Training step time:" << cnn_training_step_time.count() << "microseconds" << endl;
 	// 6. finish the training 
 	
 	//kann_train_fnn1(ann, lr, mini_size, max_epoch, max_drop_streak, frac_val, in->n_row, in->x, out->x);
