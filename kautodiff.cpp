@@ -412,7 +412,11 @@ static void kad_allocate_internal(int n, kad_node_t **v)
 		kad_node_t *p = v[i];
 		if (p->n_child == 0) continue;
 		if(p->x_c) delete[] p->x_c;
-        p->x_c = new SEALCiphertext[kad_len(p)];
+		if (p->op == ){
+			
+		}else{
+        	p->x_c = new SEALCiphertext[kad_len(p)];
+		}
 		for(j = 0; j< kad_len(p); j++)
 			p->x_c[j].init(engine);
         if (kad_is_back(p)) {
@@ -519,7 +523,9 @@ void kad_delete(int n, kad_node_t **a)
 		kad_node_t *p = a[i];
 		if (p->n_child) {
 			// All internal nodes are encrypted.
-			delete[] p->x_c, p->g_c, p->g; 
+			delete[] p->x_c;
+			delete[] p->g_c;
+			delete[] p->g; 
 		}
 		std::free(p->child); 
 		std::free(p->ptr); 

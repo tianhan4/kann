@@ -162,7 +162,11 @@ void kann_delete_unrolled(kann_t *a)
 void kann_delete(kann_t *a)
 {
 	if (a == 0) return;
-	delete[] a->x, a->g, a->c, a->x_c, a->g_c;
+	delete[] a->x;
+	delete[] a->g;
+	delete[] a->c;
+	delete[] a->x_c;
+	delete[] a->g_c;
 	kann_delete_unrolled(a);
 }
 
