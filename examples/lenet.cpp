@@ -39,7 +39,10 @@ static kann_t *lenet_gen(unsigned int n_labels)
     lenet = kad_relu(kann_layer_dense(lenet, 84));
     lenet = kad_relu(kann_layer_dense(lenet, n_labels));
 
-    return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
+    if (n_labels == 1)
+        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
+    else
+        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEM), 0);
 }
 
 
