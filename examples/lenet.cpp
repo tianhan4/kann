@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include "kann.h"
+#include "util.hpp"
 #include "kann_extra/kann_data.h"
 
 using namespace std;
@@ -31,141 +32,18 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 6, 3, 3, 1, 1, 1, 1);
+    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
-    lenet = kann_layer_conv2d(lenet, 16, 3, 3, 1, 1, 0, 0);
+    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
     lenet = kad_relu(kann_layer_dense(lenet, 120));
     lenet = kad_relu(kann_layer_dense(lenet, 84));
-    lenet = kad_relu(kann_layer_dense(lenet, n_labels));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
     else
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEM), 0);
 }
-
-
-template<typename T>
-static inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3)
-{
-    /*
-    Save the formatting information for std::cout.
-    */
-    std::ios old_fmt(nullptr);
-    old_fmt.copyfmt(std::cout);
-
-    size_t slot_count = vec.size();
-
-    std::cout << std::fixed << std::setprecision(prec);
-    std::cout << std::endl;
-    if(slot_count <= 2 * print_size)
-    {
-        std::cout << "    [";
-        for (size_t i = 0; i < slot_count; i++)
-        {
-            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
-        }
-    }
-    else
-    {
-        vec.resize(std::max(vec.size(), 2 * print_size));
-        std::cout << "    [";
-        for (size_t i = 0; i < print_size; i++)
-        {
-            std::cout << " " << vec[i] << ",";
-        }
-        if(vec.size() > 2 * print_size)
-        {
-            std::cout << " ...,";
-        }
-        for (size_t i = slot_count - print_size; i < slot_count; i++)
-        {
-            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
-        }
-    }
-    //std::cout << "size: " << vec.size();
-    std::cout << std::endl;
-
-    /*
-    Restore the old std::cout formatting.
-    */
-    std::cout.copyfmt(old_fmt);
-}
-
-void print_ciphertext(SEALCiphertext *cipher){
-    engine->decrypt(*cipher, *plaintext);
-    engine->decode(*plaintext, t);
-    cout << t.size() << endl;
-    print_vector(t);
-}
-
-void print_model(kann_t * model, int from, bool grad){
-    int i,j,k;
-    assert(from < model->n);
-    cout << "total node num:" << model->n << endl;
-    for(i = 0; i <= from ;i++){
-        if (kad_is_feed(model->v[i])){
-            cout << "node " << i << ": " << "feed" << " size: " << kad_len(model->v[i]) << endl;
-        }
-        else if (kad_is_var(model->v[i])) {
-            cout << "node " << i << ": " << "leaf" << " size: " << kad_len(model->v[i]) << endl;
-        }
-        else {
-            cout << "node " << i << ": " << kad_op_name[model->v[i]->op] << " size: " << kad_len(model->v[i]) << endl;
-        }
-        if (kad_is_feed(model->v[i]) && model->v[i]->x_c){
-            cout << "encrypted feed:" << endl;
-            cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->x_c[0].ciphertext().parms_id())->chain_index() << endl;
-            cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
-            for (j = 0; j < kad_len(model->v[i]); j++){
-                engine->decrypt(model->v[i]->x_c[j], *plaintext);
-                engine->decode(*plaintext, t);
-                print_vector(t);
-            }
-        }
-        else if (kad_is_back(model->v[i])){
-            if(seal_is_encrypted(model->v[i])){
-                cout << "encrypted:" << endl;
-                cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->x_c[0].ciphertext().parms_id())->chain_index() << endl;
-                cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
-                for (j = 0; j < kad_len(model->v[i]); j++){
-                    engine->decrypt(model->v[i]->x_c[j], *plaintext);
-                    engine->decode(*plaintext, t);
-                    print_vector(t);
-                }
-                if(grad){
-                    cout << "encrytped grad:" << endl;
-                    if(model->v[i]->g_c[0].clean()){
-                        cout << "clean grad" << endl;
-                    }else{
-                        for (j = 0; j < kad_len(model->v[i]); j++){
-                            engine->decrypt(model->v[i]->g_c[j], *plaintext);
-                            engine->decode(*plaintext, t);
-                            print_vector(t);
-                        }
-                    }
-                }
-            }else{
-                cout << "plain var:" << endl;
-                for (j = 0; j < kad_len(model->v[i]); j++){
-                    cout << model->v[i]->x[j] << endl;
-                }
-                if (grad){
-                    cout << "plain grad:" << endl;
-                    if(model->v[i]->g_c[0].clean()){
-                        cout << "clean grad" << endl;
-                    }else{
-                        for (j = 0; j < kad_len(model->v[i]); j++){
-                            cout << model->v[i]->g[j] << endl;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 
 int main(int argc, char *argv[])
 {
@@ -176,6 +54,7 @@ int main(int argc, char *argv[])
     kann_data_t *in = 0;
     kann_data_t *out = 0;
     kann_t *ann = 0;
+	int max_parallel = 1000;
     char *out_fn = 0, *in_fn = 0;
     float lr = 0.001f, frac_val = 0.1f, h_dropout = 0.0f;
     chrono::high_resolution_clock::time_point time_start, time_end;
@@ -238,7 +117,10 @@ int main(int argc, char *argv[])
     cout << "slot count: " << slot_count<< endl;
     cout << "scale: 2^" << standard_scale << endl;
     plaintext = new SEALPlaintext(engine);
-    ciphertext = new SEALCiphertext(engine);
+	ciphertext = new SEALCiphertext[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		ciphertext[i].init(engine);
+	}
     engine->zero = new SEALCiphertext(engine);
     engine->encode(0, *plaintext);
     engine->encrypt(*plaintext, *(engine->zero));
@@ -344,12 +226,8 @@ int main(int argc, char *argv[])
     time_end = chrono::high_resolution_clock::now();
     int i_cost = kann_find(cnn_ann, KANN_F_COST, 0);
     training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-    print_model(cnn_ann, i_cost, 1);
+    //print_model(cnn_ann, i_cost, 1);
     cout << "CNN Training step time:" << training_step_time.count() << "microseconds" << endl;
-
-    // 5.6 check cnn gradients
-    kad_check_grad(cnn_ann->n, cnn_ann->v, i_cost);
-
 
     // 6. finish the training 
     
@@ -359,9 +237,7 @@ int main(int argc, char *argv[])
     kann_data_free(out);
     delete shuf;
     delete plaintext;
-    delete ciphertext;
-    kann_data_free(out);
-    kann_data_free(in);
+    delete[] ciphertext;
     kann_delete(ann);
     kann_delete(cnn_ann);
     return 0;

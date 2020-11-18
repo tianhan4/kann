@@ -7,13 +7,13 @@
 #include <cfloat>
 #include <cmath>
 #include <iostream>
+#include <omp.h>
 
 #ifndef _DEBUG // works in VS
 #define DEBUG(x) 
 #else
 #define DEBUG(x) do { std::cerr << x << std::endl; } while (0)
 #endif
-
 bool remote = false; 
 std::shared_ptr<SEALEngine> engine;
 SEALPlaintext *plaintext;
@@ -412,17 +412,24 @@ static void kad_allocate_internal(int n, kad_node_t **v)
 		kad_node_t *p = v[i];
 		if (p->n_child == 0) continue;
 		if(p->x_c) delete[] p->x_c;
-		if (p->op == 8){
-			p->x_c = p->child[0]->x_c;  //reuse
-		}else{
+		//if (p->op == 8 || p->op == 1){
+		//	p->x_c = p->child[0]->x_c;  //reuse
+		//	p->child[0]->ext_flag |= KAD_X_SKIP;
+		//}else{
         	p->x_c = new SEALCiphertext[kad_len(p)];
-		}
+		//}
+		//if (p->op == 3 || p->op == 16){   //x_c[i] in child[0] will be useless after calculating g_c[i]
+		//	if (kad_is_back(p->child[0])){
+		//		p->child[0]->ext_flag |= KAD_X_G_SHARED;
+		//		delete[] p->child[0]->g_c;
+		//		p->child[0]->g_c = p->child[0]->x_c;
+		//	}  
+		//}
 		for(j = 0; j< kad_len(p); j++)
 			p->x_c[j].init(engine);
         if (kad_is_back(p)) {
 			if(p->g_c) delete[] p->g_c;
-			if(p->op == 1 && p->op == 17) p->g_c = p->x_c;
-			else p->g_c = new SEALCiphertext[kad_len(p)];
+			p->g_c = new SEALCiphertext[kad_len(p)];
 			for(j = 0; j< kad_len(p); j++)
 				p->g_c[j].init(engine);
 			if(p->g) delete[] p->g;	
@@ -524,8 +531,9 @@ void kad_delete(int n, kad_node_t **a)
 		kad_node_t *p = a[i];
 		if (p->n_child) {
 			// All internal nodes are encrypted.
-			if(p->op!=8)delete[] p->x_c;
-			if(p->op!=1 && p->op!=17){
+			if(!(p->ext_flag & KAD_X_SKIP))
+				delete[] p->x_c;
+			if(!(p->ext_flag & KAD_X_G_SHARED)){
 				delete[] p->g_c;
 			}
 			if(p->g) delete[] p->g;
@@ -630,7 +638,7 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
         if (a[i]->tmp >0){ //feed doesn't have gradient.
 			if ((a[i]->g))
 				memset(a[i]->g, 0, kad_len(a[i]) * sizeof(float));
-			if ((a[i]->g_c))
+			if ((a[i]->g_c) && !(a[i]->ext_flag & KAD_X_G_SHARED))
             	for(j = 0; j < kad_len(a[i]); j++) a[i]->g_c[j].clean() = true;
         }
     }
@@ -659,7 +667,12 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 				}
 			}
 			else{
-				for(j = 0; j < kad_len(a[i]); j++){
+
+int len_num = kad_len(a[i]);
+#pragma omp parallel
+{
+#pragma omp for
+				for(j = 0; j < len_num; j++){
 					if (a[i]->g_c[j].clean()){
 						continue;
 					}else{
@@ -668,7 +681,7 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 					}
 
 				}
-
+}
 			}
 		}
 	}
@@ -830,9 +843,15 @@ static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, SEALCiphertext *
     int i;
     SEALCiphertext s(engine);
     s.clean() = true;
+#pragma omp parallel
+{
+#pragma omp for
     for (i = 0; i < n; i++) {
-        seal_multiply(x[i], y[i], *ciphertext);
-        seal_add_inplace(s, *ciphertext);
+        seal_multiply(x[i], y[i], ciphertext[i]);
+    }
+}
+	for (i = 0; i < n; i++) {
+        seal_add_inplace(s, ciphertext[i]);
     }
     return s;
 }
@@ -841,8 +860,14 @@ static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, const float *y){
     int i;
     SEALCiphertext s(engine);
     s.clean() = true;
+#pragma omp parallel
+{
+#pragma omp for
     for (i = 0; i < n; i++) {
-        seal_multiply(x[i], y[i], *ciphertext);
+        seal_multiply(x[i], y[i], ciphertext[i]);
+    }
+}
+    for (i = 0; i < n; i++) {
         seal_add_inplace(s, *ciphertext);
     }
     return s;
@@ -857,36 +882,55 @@ static inline float kad_sdot(int n, const float *x, const float *y) /* BLAS sdot
 }
 
 
-static inline void kad_saxpy_inlined(int n, SEALCiphertext a, SEALCiphertext *x, SEALCiphertext *y){
+static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, SEALCiphertext *x, SEALCiphertext *y){
     int i;
-    for (i = 0; i < n; ++i){
-        seal_multiply(x[i], a, *ciphertext);
-        seal_add_inplace(y[i], *ciphertext);
-    }
+	if(n == 0)return;
+	#pragma omp parallel
+	{
+	#pragma omp for
+		for (i = 0; i < n; ++i){
+			ciphertext[i] = a;
+			seal_multiply_inplace(ciphertext[i], x[i]);
+			seal_add_inplace(y[i], ciphertext[i]);
+		}
+	}
 }
 
 static inline void kad_saxpy_inlined(int n, float a, SEALCiphertext *x, SEALCiphertext *y){
     int i;
-    for (i = 0; i <n; ++i){
-        seal_multiply(x[i], a, *ciphertext);
-        seal_add_inplace(y[i], *ciphertext);
+#pragma omp parallel
+{
+#pragma omp for
+    for (i = 0; i < n; ++i){
+        seal_multiply(x[i], a, ciphertext[i]);
+        seal_add_inplace(y[i], ciphertext[i]);
     }
+}
 }
 
 static inline void kad_saxpy_inlined(int n, float a, const float *x, SEALCiphertext *y){
     int i;
-    for (i = 0; i <n; ++i){
+#pragma omp parallel
+{
+#pragma omp for
+    for (i = 0; i < n; ++i){
         seal_add_inplace(y[i], (x[i]*a));
     }
 }
+}
 
 
-static inline void kad_saxpy_inlined(int n, SEALCiphertext a, const float *x, SEALCiphertext *y){
+static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, const float *x, SEALCiphertext *y){
     int i;
+	if(n == 0)return;
+#pragma omp parallel
+{
+#pragma omp for
     for (i = 0; i < n; ++i){
-        seal_multiply(a, x[i], *ciphertext);
-        seal_add_inplace(y[i], *ciphertext);
+        seal_multiply(a, x[i], ciphertext[i]);
+        seal_add_inplace(y[i], ciphertext[i]);
     }
+}
 }
 
 static inline void kad_saxpy_inlined(int n, float a, const float *x, float *y) // BLAS saxpy
@@ -899,10 +943,14 @@ template<typename T>
 void kad_vec_mul_sum(int n, SEALCiphertext *a, SEALCiphertext *b, T *c){
 	static_assert(std::is_same<T, SEALCiphertext>::value || std::is_same<T, SEALPlaintext>::value || std::is_same<T, float>::value,"Bad T");
     int i;
+#pragma omp parallel
+{
+#pragma omp for
     for (i = 0; i < n; ++i){
-        seal_multiply(b[i], c[i], *ciphertext);
-        seal_add_inplace(a[i], *ciphertext);
+        seal_multiply(b[i], c[i], ciphertext[i]);
+        seal_add_inplace(a[i], ciphertext[i]);
     }
+}
 }
 
 void kad_vec_mul_sum(int n, float *a, const float *b, const float *c)
@@ -911,11 +959,15 @@ void kad_vec_mul_sum(int n, float *a, const float *b, const float *c)
 	for (i = 0; i < n; ++i) a[i] += b[i] * c[i];
 }
 
-template<typename A, typename B, typename C>
-void kad_saxpy(int n, B a, A *x, C *y){
+template<typename A, typename C>
+void kad_saxpy(int n, SEALCiphertext &a, A *x, C *y){
     kad_saxpy_inlined(n, a, x, y);
 }
 
+template<typename A, typename C>
+void kad_saxpy(int n, float a, A *x, C *y){
+    kad_saxpy_inlined(n, a, x, y);
+}
 
 template<typename T> 
 void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, SEALCiphertext *A, T *B, SEALCiphertext *C){
@@ -1163,8 +1215,13 @@ int kad_op_cmul(kad_node_t *p, int action)
         else
 			kad_sgemm_simple(0, 1, n_a_row, n_b_row, n_col, q[0]->x_c, q[1]->x, p->x_c); /* Y = X * trans(W) */
 	} else if (action == KAD_BACKWARD) {
+
 		if (kad_is_back(q[1]) && q[0]->x_c)
 			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c); /* G_w <- trans(G_y) * X */
+
+		//after optimizing , cmul/conv2d need to clean the previous gradients by ourselves.
+		//if (kad_is_back(q[0]))
+        //	for(j = 0; j < kad_len(q[0]); j++) q[0]->g_c[j].clean() = true;
 		if (kad_is_back(q[0]) && (q[1]->x))
 			kad_sgemm_simple(0, 0, n_a_row, n_col, n_b_row, p->g_c, q[1]->x, q[0]->g_c); /* G_x <- G_y * W */
         else if (kad_is_back(q[0]) && seal_is_encrypted(q[1]))
@@ -1939,7 +1996,7 @@ int kad_op_relu(kad_node_t *p, int action)
 					engine->decrypt(p->g_c[i], *plaintext);
 					engine->decode(*plaintext, t);
 					for (j = 0; j < t.size(); ++j)
-						test_t[j] = test_t[j] > 0.0f? t[j] : 0.0f;
+						test_t[j] = test_t[j] > 0.0f + 1e-6? t[j] : 0.0f;
 					engine->encode(test_t, *plaintext);
 					engine->encrypt(*plaintext, *ciphertext);
 					seal_add_inplace(q->g_c[i], *ciphertext);					
@@ -2302,37 +2359,42 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
 		p->d[0] = w->d[0], p->d[1] = conv_out_size(q->d[1], &aux[0]), p->d[2] = conv_out_size(q->d[2], &aux[1]);
 	} else if (action == KAD_FORWARD) {
         if(seal_is_encrypted(w)){
-		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+		    //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
             for (l = 0; l < kad_len(p); l++)
                 p->x_c[l].clean() = true;
             conv2d_loop1(q->x_c, w->x_c, p->x_c, t1, process_row_for);
-            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+            //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
 			
         }else{
-		    conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+		    //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
             for (l = 0; l < kad_len(p); l++)
                 p->x_c[l].clean() = true;
             conv2d_loop1(q->x_c, w->x, p->x_c, t1, process_row_for);
-            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+            //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 		}
 	} else if (action == KAD_BACKWARD) {
+		if (kad_is_back(p->child[1])) { /* backprop to the weight matrix */
+            //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
+            conv2d_loop1(q->x_c, w->g_c, p->g_c, t1, process_row_back_w);
+            //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
+		}
+		
+		//after optimizing , cmul/conv2d need to clean the previous gradients by ourselves.
+        //if (kad_is_back(q))
+		//	for(int j = 0; j < kad_len(q); j++) q->g_c[j].clean() = true;
+
 		if (kad_is_back(p->child[0])) { /* backprop to the input array */
             if(seal_is_encrypted(w)){
-                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+                //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
                 conv2d_loop1(q->g_c, w->x_c, p->g_c, t1, process_row_back_x);
-                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
+                //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
 
             }else{
-                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+                //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
                 conv2d_loop1(q->g_c, w->x, p->g_c, t1, process_row_back_x);
-                conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
+                //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 
             }
-		}
-		if (kad_is_back(p->child[1])) { /* backprop to the weight matrix */
-            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
-            conv2d_loop1(q->x_c, w->g_c, p->g_c, t1, process_row_back_w);
-            conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->g_c);
 		}
 	}
 	delete[] x_padded;
@@ -2680,6 +2742,8 @@ static void kad_add_delta(int n, kad_node_t **a, float c, float *delta)
 		}
 }
 
+
+// not that good, the correct way is to delta just the input. 
 void kad_check_grad(int n, kad_node_t **a, int from)
 {
 	const float eps = 1e-5f, rel = 1e-7f / eps;
@@ -2697,9 +2761,13 @@ void kad_check_grad(int n, kad_node_t **a, int from)
             if (seal_is_encrypted(a[i])){
                 for (j = 0; j < kad_len(a[i]); j++){
                     // should be size 1
-					engine->decrypt(a[i]->g_c[j], *plaintext);
-					engine->decode(*plaintext, t);
-					g0[k+j] = t[0];
+					if(a[i]->g_c[j].clean()){
+						g0[k+j] = 0.0;
+					}else{
+						engine->decrypt(a[i]->g_c[j], *plaintext);
+						engine->decode(*plaintext, t);
+						g0[k+j] = t[0];
+					}
 				}
 
             } else {

@@ -59,6 +59,10 @@ using namespace hewrapper;
 #define SEAL_PLAIN 0x40
 #define SEAL_COST 0x80
 
+//for ext_label
+#define KAD_X_G_SHARED 0x1
+#define KAD_X_SKIP 0x2
+
 /*
  * gradient state:
  *      1. grad clean: unused encrypted grad, to identify the 1st operation on grad.

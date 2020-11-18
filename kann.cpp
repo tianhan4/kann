@@ -377,24 +377,6 @@ kad_node_t *kann_new_leaf_array(int *offset, kad_node_p *par, uint8_t flag, floa
 		p->flag |= SEAL_CIPHER;
 		p->x_c = new SEALCiphertext[len];
 		if (p->n_d <= 1) {
-			for (i = 0; i < len; ++i){
-p->x_c[i].init(engine); 
-engine->encode(3.0, *plaintext);
-engine->encrypt(*plaintext, p->x_c[i]);
-				/**
-				p->x_c[i].init(engine); 
-				engine->encode(x0_01, *plaintext);
-				engine->encrypt(*plaintext, p->x_c[i]);
-				cout << "ciphertext in leaf:" << p->x_c[i].size() << endl;
-				**/
-			}
-		} else {
-for (i = 0; i < len; ++i){
-	p->x_c[i].init(engine);
-	engine->encode(2.0, *plaintext);
-	engine->encrypt(*plaintext, p->x_c[i]);
-}
-			/**
 			double sdev_inv;
 			sdev_inv = 1.0 / sqrt((double)len);
 			for (i = 0; i < len; ++i){
@@ -402,7 +384,21 @@ for (i = 0; i < len; ++i){
 				engine->encode((float)(kad_drand_normal(0) * sdev_inv), *plaintext);
 				engine->encrypt(*plaintext, p->x_c[i]);
 			}
+			/**
+			for (i = 0; i < len; ++i){
+				p->x_c[i].init(engine); 
+				engine->encode(x0_01, *plaintext);
+				engine->encrypt(*plaintext, p->x_c[i]);
+			}
 			**/
+		} else {
+			double sdev_inv;
+			sdev_inv = 1.0 / sqrt((double)len) / p->d[0];
+			for (i = 0; i < len; ++i){
+				p->x_c[i].init(engine);
+				engine->encode((float)(kad_drand_normal(0) * sdev_inv), *plaintext);
+				engine->encrypt(*plaintext, p->x_c[i]);
+			}
 		}
 	}else{
 		p->x = new float[len];
@@ -504,8 +500,8 @@ kad_node_t *kann_layer_conv2d(kad_node_t *in, int n_flt, int k_rows, int k_cols,
 }
 
 
-{
 kad_node_t *kann_layer_cost(kad_node_t *t, int n_out, int cost_type, bool is_w_encrypted, bool is_b_encrypted)
+{
 	kad_node_t *cost = 0, *truth = 0;
 	assert(cost_type == KANN_C_CEB || cost_type == KANN_C_CEM || cost_type == KANN_C_MSE);
 	t = kann_layer_dense(t, n_out, is_w_encrypted, is_b_encrypted);

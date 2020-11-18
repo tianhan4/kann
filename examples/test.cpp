@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include "util.hpp"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
 
@@ -24,128 +25,6 @@ static kann_t *model_gen(int n_in, int n_out, int loss_type, int n_h_layers, int
 	return kann_new(kann_layer_cost(t, n_out, loss_type, true, true), 0);
 }
 
-
-template<typename T>
-static inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3)
-{
-    /*
-    Save the formatting information for std::cout.
-    */
-    std::ios old_fmt(nullptr);
-    old_fmt.copyfmt(std::cout);
-
-    size_t slot_count = vec.size();
-
-    std::cout << std::fixed << std::setprecision(prec);
-    std::cout << std::endl;
-    if(slot_count <= 2 * print_size)
-    {
-        std::cout << "    [";
-        for (size_t i = 0; i < slot_count; i++)
-        {
-            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
-        }
-    }
-    else
-    {
-        vec.resize(std::max(vec.size(), 2 * print_size));
-        std::cout << "    [";
-        for (size_t i = 0; i < print_size; i++)
-        {
-            std::cout << " " << vec[i] << ",";
-        }
-        if(vec.size() > 2 * print_size)
-        {
-            std::cout << " ...,";
-        }
-        for (size_t i = slot_count - print_size; i < slot_count; i++)
-        {
-            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
-        }
-    }
-	//std::cout << "size: " << vec.size();
-    std::cout << std::endl;
-
-    /*
-    Restore the old std::cout formatting.
-    */
-    std::cout.copyfmt(old_fmt);
-}
-
-void print_ciphertext(SEALCiphertext *cipher){
-	engine->decrypt(*cipher, *plaintext);
-	engine->decode(*plaintext, t);
-	cout << t.size() << endl;
-	print_vector(t);
-}
-
-void print_model(kann_t * model, int from, bool grad){
-	int i,j,k;
-	assert(from < model->n);
-	cout << "total node num:" << model->n << endl;
-	for(i = 0; i <= from ;i++){
-		if (kad_is_feed(model->v[i])){
-			cout << "node " << i << ": " << "feed" << " size: " << kad_len(model->v[i]) << endl;
-		}
-		else if (kad_is_var(model->v[i])) {
-			cout << "node " << i << ": " << "leaf" << " size: " << kad_len(model->v[i]) << endl;
-		}
-		else {
-			cout << "node " << i << ": " << kad_op_name[model->v[i]->op] << " size: " << kad_len(model->v[i]) << endl;
-		}
-		if (kad_is_feed(model->v[i]) && model->v[i]->x_c){
-			cout << "encrypted feed:" << endl;
-			cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->x_c[0].ciphertext().parms_id())->chain_index() << endl;
-			cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
-			for (j = 0; j < kad_len(model->v[i]); j++){
-				engine->decrypt(model->v[i]->x_c[j], *plaintext);
-				engine->decode(*plaintext, t);
-				print_vector(t);
-			}
-		}
-		else if (kad_is_back(model->v[i])){
-			if(seal_is_encrypted(model->v[i])){
-				cout << "encrypted:" << endl;
-				cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->x_c[0].ciphertext().parms_id())->chain_index() << endl;
-				cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
-				for (j = 0; j < kad_len(model->v[i]); j++){
-					engine->decrypt(model->v[i]->x_c[j], *plaintext);
-					engine->decode(*plaintext, t);
-					print_vector(t);
-				}
-				if(grad){
-					cout << "encrytped grad:" << endl;
-					if(model->v[i]->g_c[0].clean()){
-						cout << "clean grad" << endl;
-					}else{
-						for (j = 0; j < kad_len(model->v[i]); j++){
-							engine->decrypt(model->v[i]->g_c[j], *plaintext);
-							engine->decode(*plaintext, t);
-							print_vector(t);
-						}
-					}
-				}
-			}else{
-				cout << "plain var:" << endl;
-				for (j = 0; j < kad_len(model->v[i]); j++){
-					cout << model->v[i]->x[j] << endl;
-				}
-				if (grad){
-					cout << "plain grad:" << endl;
-					if(model->v[i]->g_c[0].clean()){
-						cout << "clean grad" << endl;
-					}else{
-						for (j = 0; j < kad_len(model->v[i]); j++){
-							cout << model->v[i]->g[j] << endl;
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-
 int main(int argc, char *argv[])
 {
 	//0. set the environment
@@ -156,6 +35,7 @@ int main(int argc, char *argv[])
 	kann_data_t *out = 0;
 	kann_t *ann = 0;
 	char *out_fn = 0, *in_fn = 0;
+	int max_parallel = 200;
 	float lr = 0.001f, frac_val = 0.1f, h_dropout = 0.0f;
     chrono::high_resolution_clock::time_point time_start, time_end;
 	chrono::microseconds inference_time(0);
@@ -220,7 +100,10 @@ int main(int argc, char *argv[])
     cout << "slot count: " << slot_count<< endl;
     cout << "scale: 2^" << standard_scale << endl;
 	plaintext = new SEALPlaintext(engine);
-	ciphertext = new SEALCiphertext(engine);
+	ciphertext = new SEALCiphertext[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		ciphertext[i].init(engine);
+	}
 	engine->zero = new SEALCiphertext(engine);
 	engine->encode(0, *plaintext);
 	engine->encrypt(*plaintext, *(engine->zero));
@@ -369,7 +252,7 @@ total_samples = 128;
 	time_end = chrono::high_resolution_clock::now();
 	i_cost = kann_find(ann, KANN_F_COST, 0);
 	training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-	//print_model(ann, i_cost, 1);
+	print_model(ann, i_cost, 1);
 
 	// 5. check the gradients
 	kad_check_grad(ann->n, ann->v, i_cost);
@@ -382,7 +265,7 @@ total_samples = 128;
 	pseudo_image_data->n_col = 25;
 	pseudo_image_data->x = new float* [pseudo_image_data->n_row];
 	for (i = 0 ; i< pseudo_image_data->n_row; i++){
-		pseudo_image_data->x[i] = new float [pseudo_image_data->n_col]{1,2,1,2,-2,-1,-2,-1,1,2,1,2,-2,-1,-2,-1,2,-2,-1,-2,-1,2,-2,-1,-2};
+		pseudo_image_data->x[i] = new float [pseudo_image_data->n_col]{1,2,3,4,5,6,7,8,9,8,7,6,5,4,3,2,1,2,3,4,5,6,7,8,9};
 	}
 	//create a classification label
 	kann_data_t *pseudo_image_label = new kann_data_t();
@@ -444,11 +327,17 @@ total_samples = 128;
 	kann_t *cnn_ann;
 	cnn_t = kad_feed(3, 1, 5, 5), cnn_t->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
 	cnn_t = kann_layer_conv2d(cnn_t, 1, 3, 3, 1, 1, 0, 0);
-	cnn_t = kad_relu(cnn_t); // 3x3 kernel; 1x1 stride; 0x0 padding
+
 	cnn_t = kad_max2d(cnn_t, 2, 2, 1, 1, 0, 0); // 2x2 kernel; 2x2 stride; 0x0 padding
+	cnn_t = kad_relu(cnn_t); // 3x3 kernel; 1x1 stride; 0x0 padding
 	//cnn_t = kann_layer_dropout(cnn_t, 0.0);
 	cnn_ann = kann_new(kann_layer_cost(cnn_t, pseudo_image_label->n_col, KANN_C_CEM), 0);
 
+	//set the initial filter
+	for (i = 0; i < 9; ++i){
+		engine->encode(pow(0.1,i), *plaintext);
+		engine->encrypt(*plaintext, cnn_ann->v[1]->x_c[i]);
+	}
 
 	cout << "CNN Back propagation start" << endl;
 	kann_switch(cnn_ann, 1);
@@ -462,11 +351,10 @@ total_samples = 128;
 	time_end = chrono::high_resolution_clock::now();
 	i_cost = kann_find(cnn_ann, KANN_F_COST, 0);
 	cnn_training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-	//print_model(cnn_ann, i_cost, 1);
+	print_model(cnn_ann, i_cost, 1);
 
-	// 5.6 check cnn gradients
+	//5.6 check cnn gradients
 	kad_check_grad(cnn_ann->n, cnn_ann->v, i_cost);
-
 
     cout << "Inference time:" << inference_time.count() << "microseconds" << endl;
     cout << "Training step time:" << training_step_time.count() << "microseconds" << endl;
@@ -526,7 +414,7 @@ total_samples = 128;
 
 	delete shuf;
 	delete plaintext;
-	delete ciphertext;
+	delete[] ciphertext;
 	kann_data_free(out);
 	kann_data_free(in);
 	kann_delete(ann);
