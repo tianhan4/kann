@@ -18,10 +18,9 @@ bool remote = false;
 std::shared_ptr<SEALEngine> engine;
 SEALPlaintext *plaintext;
 SEALCiphertext *ciphertext;
-SEALCiphertext *zero;
-vector<double> t;
-vector<double> test_t;   
-vector<double> truth_t;
+vector<double> * t;
+vector<double> *test_t;   
+vector<double> *truth_t;
 
 typedef struct {
 	uint64_t s[2];
@@ -642,11 +641,12 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
             	for(j = 0; j < kad_len(a[i]); j++) a[i]->g_c[j].clean() = true;
         }
     }
-	for (i = from, a[i]->g[0] = 1; i >= 0; --i) /* backprop */
+	for (i = from, a[i]->g[0] = 1; i >= 0; --i){ /* backprop */
 		if (a[i]->n_child && a[i]->tmp > 0){
 			cout << "back propagating :" << i << " op " << kad_op_name[a[i]->op] << endl;
 			kad_op_list[a[i]->op](a[i], KAD_BACKWARD);
-		}
+        }
+	}
 	//sum encrypted gradients
 	for (i = 0; i <= from; ++i){
 		if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
@@ -654,16 +654,23 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 				if(remote){
 					assert(false);
 				}else{
-					for(j = 0; j < kad_len(a[i]); j++){
+
+					int node_num = kad_len(a[i]);
+#pragma omp parallel
+{
+#pragma omp for
+					for(j = 0; j < node_num; j++){
+						int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
 						if (a[i]->g_c[j].clean()) {
 							a[i]->g[j] = 0.0;
 						}else{
-							engine->decrypt(a[i]->g_c[j], *plaintext);
-							engine->decode(*plaintext, t);
+							engine->decrypt(a[i]->g_c[j], plaintext[thread_mod_id]);
+							engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
 							//here is where noise should be added.
-							a[i]->g[j] = std::accumulate(t.begin(), t.end(), 0);		
+							a[i]->g[j] = std::accumulate(t[thread_mod_id].begin(), t[thread_mod_id].end(), 0);		
 						}
 					}
+}
 				}
 			}
 			else{
@@ -847,12 +854,14 @@ static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, SEALCiphertext *
 {
 #pragma omp for
     for (i = 0; i < n; i++) {
-        seal_multiply(x[i], y[i], ciphertext[i]);
+		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+        seal_multiply(x[i], y[i], ciphertext[thread_mod_id]);
+        #pragma omp critical
+        {
+            seal_add_inplace(s, ciphertext[thread_mod_id]);       
+        }
     }
 }
-	for (i = 0; i < n; i++) {
-        seal_add_inplace(s, ciphertext[i]);
-    }
     return s;
 }
 
@@ -864,12 +873,14 @@ static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, const float *y){
 {
 #pragma omp for
     for (i = 0; i < n; i++) {
-        seal_multiply(x[i], y[i], ciphertext[i]);
+		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+        seal_multiply(x[i], y[i], ciphertext[thread_mod_id]);
+        #pragma omp critical
+        {
+            seal_add_inplace(s, ciphertext[thread_mod_id]);       
+        }
     }
 }
-    for (i = 0; i < n; i++) {
-        seal_add_inplace(s, *ciphertext);
-    }
     return s;
 }
 
@@ -882,28 +893,31 @@ static inline float kad_sdot(int n, const float *x, const float *y) /* BLAS sdot
 }
 
 
-static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, SEALCiphertext *x, SEALCiphertext *y){
+static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, SEALCiphertext *x, SEALCiphertext *y, bool is_parameter = false){
     int i;
 	if(n == 0)return;
 	#pragma omp parallel
 	{
 	#pragma omp for
 		for (i = 0; i < n; ++i){
-			ciphertext[i] = a;
-			seal_multiply_inplace(ciphertext[i], x[i]);
-			seal_add_inplace(y[i], ciphertext[i]);
+			int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+			ciphertext[thread_mod_id] = a;
+			if(is_parameter)seal_multiply_inplace(ciphertext[thread_mod_id], x[i], true);
+			else seal_multiply_inplace(ciphertext[thread_mod_id], x[i]);
+			seal_add_inplace(y[i], ciphertext[thread_mod_id]);
 		}
 	}
 }
 
-static inline void kad_saxpy_inlined(int n, float a, SEALCiphertext *x, SEALCiphertext *y){
+static inline void kad_saxpy_inlined(int n, float a, SEALCiphertext *x, SEALCiphertext *y, bool is_parameter = false){
     int i;
 #pragma omp parallel
 {
 #pragma omp for
     for (i = 0; i < n; ++i){
-        seal_multiply(x[i], a, ciphertext[i]);
-        seal_add_inplace(y[i], ciphertext[i]);
+		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+        seal_multiply(x[i], a, ciphertext[thread_mod_id]);
+        seal_add_inplace(y[i], ciphertext[thread_mod_id]);
     }
 }
 }
@@ -920,15 +934,16 @@ static inline void kad_saxpy_inlined(int n, float a, const float *x, SEALCiphert
 }
 
 
-static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, const float *x, SEALCiphertext *y){
+static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, const float *x, SEALCiphertext *y, bool is_parameter = false){
     int i;
 	if(n == 0)return;
 #pragma omp parallel
 {
 #pragma omp for
     for (i = 0; i < n; ++i){
-        seal_multiply(a, x[i], ciphertext[i]);
-        seal_add_inplace(y[i], ciphertext[i]);
+		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+        seal_multiply(a, x[i], ciphertext[thread_mod_id]);
+        seal_add_inplace(y[i], ciphertext[thread_mod_id]);
     }
 }
 }
@@ -947,8 +962,9 @@ void kad_vec_mul_sum(int n, SEALCiphertext *a, SEALCiphertext *b, T *c){
 {
 #pragma omp for
     for (i = 0; i < n; ++i){
-        seal_multiply(b[i], c[i], ciphertext[i]);
-        seal_add_inplace(a[i], ciphertext[i]);
+		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+        seal_multiply(b[i], c[i], ciphertext[thread_mod_id]);
+        seal_add_inplace(a[i], ciphertext[thread_mod_id]);
     }
 }
 }
@@ -970,7 +986,7 @@ void kad_saxpy(int n, float a, A *x, C *y){
 }
 
 template<typename T> 
-void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, SEALCiphertext *A, T *B, SEALCiphertext *C){
+void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, SEALCiphertext *A, T *B, SEALCiphertext *C, bool is_parameter = false){
     static const int x = 16;
 	int i, j, k;
 	if (!trans_A && trans_B) {
@@ -991,11 +1007,11 @@ void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, SEALCiphert
 	} else if (!trans_A && !trans_B) {
 		for (i = 0; i < M; ++i)
 			for (k = 0; k < K; ++k)
-				kad_saxpy_inlined(N, A[i*K+k], &B[k*N], &C[i*N]); 
+				kad_saxpy_inlined(N, A[i*K+k], &B[k*N], &C[i*N], is_parameter); 
 	} else if (trans_A && !trans_B) {
 		for (k = 0; k < K; ++k)
 			for (i = 0; i < M; ++i)
-				kad_saxpy_inlined(N, A[k*M+i], &B[k*N], &C[i*N]);
+				kad_saxpy_inlined(N, A[k*M+i], &B[k*N], &C[i*N], is_parameter);
 	} else abort(); /* not implemented for (trans_A && trans_B) */
 }
 
@@ -1217,7 +1233,7 @@ int kad_op_cmul(kad_node_t *p, int action)
 	} else if (action == KAD_BACKWARD) {
 
 		if (kad_is_back(q[1]) && q[0]->x_c)
-			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c); /* G_w <- trans(G_y) * X */
+			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c, true); /* G_w <- trans(G_y) * X */
 
 		//after optimizing , cmul/conv2d need to clean the previous gradients by ourselves.
 		//if (kad_is_back(q[0]))
@@ -1306,6 +1322,7 @@ int kad_op_1minus(kad_node_t *p, int action)
 
 int kad_op_exp(kad_node_t *p, int action)
 {
+/**
 	int i, j, n;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
@@ -1332,11 +1349,12 @@ int kad_op_exp(kad_node_t *p, int action)
                 seal_add_inplace(q->g_c[i], *ciphertext);
         }
 	}
+**/
 	return 0;
 }
-
 int kad_op_log(kad_node_t *p, int action)
 {
+/**
 	int i, j, n;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
@@ -1376,13 +1394,14 @@ int kad_op_log(kad_node_t *p, int action)
 			}
 		}
 	}
+**/
 	return 0;
 }
-
 
 // sum on the (p->ptr) axis.
 int kad_op_reduce_sum(kad_node_t *p, int action)
 {
+/**
 	kad_node_t *q = p->child[0];
 	int i, j, k, axis, d0, d1;
 
@@ -1408,11 +1427,13 @@ int kad_op_reduce_sum(kad_node_t *p, int action)
 				for (k = 0; k < d1; ++k)
 					seal_add_inplace(q->g_c[(i * q->d[axis] + j) * d1 + k], p->g_c[i * d1 + k]);;
 	}
+	**/
 	return 0;
 }
 
 int kad_op_reduce_mean(kad_node_t *p, int action)
 {
+	/**
 	kad_node_t *q = p->child[0];
 	int i, j, k, axis, d0, d1;
 
@@ -1445,13 +1466,14 @@ int kad_op_reduce_mean(kad_node_t *p, int action)
                     seal_add_inplace(q->g_c[(i*q->d[axis] + j) * d1 + k], *ciphertext);
                 }
 	}
+**/
 	return 0;
 }
 
 /********** Miscellaneous **********/
-
 int kad_op_dropout(kad_node_t *p, int action)
 {
+/**
 	int i, n;
 	kad_node_t *q = p->child[0];
 	assert(p->child[1]->n_d == 0);
@@ -1481,9 +1503,9 @@ int kad_op_dropout(kad_node_t *p, int action)
                 seal_add_inplace(q->g_c[i], *ciphertext);
             }
 	}
+**/
 	return 0;
 }
-
 
 int kad_op_sample_normal(kad_node_t *p, int action) /* not tested */
 {assert(false);
@@ -1666,12 +1688,12 @@ int kad_op_mse(kad_node_t *p, int action)
             assert(false);
         }else{
             engine->decrypt(y1->x_c[0], *plaintext);
-            engine->decode(*plaintext, test_t);
+            engine->decode(*plaintext, test_t[0]);
             engine->decrypt(y0->x_c[0], *plaintext);
-            engine->decode(*plaintext, truth_t);
-            for (i=0; i< truth_t.size(); i++)
-                test_t[i] = pow((truth_t[i] - test_t[i]), 2.0) * 1./float(y0->x_c[0].size());
-            engine->encode(test_t, *plaintext);
+            engine->decode(*plaintext, truth_t[0]);
+            for (i=0; i< truth_t[0].size(); i++)
+                test_t[0][i] = pow((truth_t[0][i] - test_t[0][i]), 2.0) * 1./float(y0->x_c[0].size());
+            engine->encode(test_t[0], *plaintext);
             engine->encrypt(*plaintext, p->x_c[0]);
 		}
 	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
@@ -1681,12 +1703,12 @@ int kad_op_mse(kad_node_t *p, int action)
         }else{
 			float coeff = 2.0f * p->g[0]/float(y0->x_c[0].size());
             engine->decrypt(y1->x_c[0], *plaintext);
-            engine->decode(*plaintext, test_t);
+            engine->decode(*plaintext, test_t[0]);
             engine->decrypt(y0->x_c[0], *plaintext);
-            engine->decode(*plaintext, truth_t);
-            for (i=0; i < truth_t.size(); i++)
-                test_t[i] = coeff * (test_t[i] - truth_t[i]);
-            engine->encode(test_t, *plaintext);
+            engine->decode(*plaintext, truth_t[0]);
+            for (i=0; i < truth_t[0].size(); i++)
+                test_t[0][i] = coeff * (test_t[0][i] - truth_t[0][i]);
+            engine->encode(test_t[0], *plaintext);
             seal_add_inplace(y1->g_c[0], *plaintext);
 		}
 	}
@@ -1695,15 +1717,15 @@ int kad_op_mse(kad_node_t *p, int action)
 
 int kad_op_ce_bin(kad_node_t *p, int action)
 {
+/**
 	static const float tiny = 1e-9f;
-	kad_node_t *y1 = p->child[0]; /* test */
-	kad_node_t *y0 = p->child[1]; /* truth */
+	kad_node_t *y1 = p->child[0]; // test 
+	kad_node_t *y0 = p->child[1]; // truth 
 	int i, n;
 	if (action == KAD_SYNC_DIM) {
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
         if (remote){
-            //NOT IMPLEMENTED
             assert(false);
         }else{
             engine->decrypt(y1->x_c[0], *plaintext);
@@ -1718,7 +1740,6 @@ int kad_op_ce_bin(kad_node_t *p, int action)
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
         if (remote){
-            //NOT IMPLEMENTED
             assert(false);
         }else{
             engine->decrypt(y1->x_c[0], *plaintext);
@@ -1731,6 +1752,7 @@ int kad_op_ce_bin(kad_node_t *p, int action)
             seal_add_inplace(y1->g_c[0], *plaintext);
         }
 	}
+**/
 	return 0;
 }
 
@@ -1767,11 +1789,11 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                 vector<double> cost(batch_size, 0.);
                 for (i = 0; i < n1; ++i){
                     engine->decrypt(y1->x_c[i], *plaintext);
-                    engine->decode(*plaintext, test_t);
+                    engine->decode(*plaintext, test_t[0]);
                     engine->decrypt(y0->x_c[i], *plaintext);
-                    engine->decode(*plaintext, truth_t);
+                    engine->decode(*plaintext, truth_t[0]);
                     for (j=0; j<batch_size;j++)
-                        cost[j] += -log(test_t[j]+1e-6)*truth_t[j]/(float)(batch_size);
+                        cost[j] += -log(test_t[0][j]+1e-6)*truth_t[0][j]/(float)(batch_size);
                 }
                 engine->encode(cost, *plaintext);
                 engine->encrypt(*plaintext, p->x_c[0]);
@@ -1779,11 +1801,11 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                 vector<double> cost(batch_size, 0.);
                 for (i = 0; i < n1; ++i){
                     engine->decrypt(y1->x_c[i], *plaintext);
-                    engine->decode(*plaintext, test_t);
+                    engine->decode(*plaintext, test_t[0]);
                     engine->decrypt(y0->x_c[i], *plaintext);
-                    engine->decode(*plaintext, truth_t);
+                    engine->decode(*plaintext, truth_t[0]);
                     for (j=0; j<batch_size;j++)
-                        cost[j] += -c->x[i]*log(test_t[j]+1e-6)*truth_t[j]/(float)(batch_size);
+                        cost[j] += -c->x[i]*log(test_t[0][j]+1e-6)*truth_t[0][j]/(float)(batch_size);
                 }
                 engine->encode(cost, *plaintext);
                 engine->encrypt(*plaintext, p->x_c[0]);
@@ -1798,23 +1820,23 @@ int kad_op_ce_multi(kad_node_t *p, int action)
             if (c == 0) {
                 for (i = 0; i < n1; ++i){
                     engine->decrypt(y1->x_c[i], *plaintext);
-                    engine->decode(*plaintext, test_t);
+                    engine->decode(*plaintext, test_t[0]);
                     engine->decrypt(y0->x_c[i], *plaintext);
-                    engine->decode(*plaintext, truth_t);
+                    engine->decode(*plaintext, truth_t[0]);
                     for (j = 0; j < batch_size; j++)
-                        test_t[j] = -coeff * truth_t[j] * 1.0 / (test_t[j]+1e-6);
-                    engine->encode(test_t, *plaintext);
+                        test_t[0][j] = -coeff * truth_t[0][j] * 1.0 / (test_t[0][j]+1e-6);
+                    engine->encode(test_t[0], *plaintext);
                     seal_add_inplace(y1->g_c[i], *plaintext);
                 }
             } else {
                 for (i = 0; i < n1; ++i){
                     engine->decrypt(y1->x_c[i], *plaintext);
-                    engine->decode(*plaintext, test_t);
+                    engine->decode(*plaintext, test_t[0]);
                     engine->decrypt(y0->x_c[i], *plaintext);
-                    engine->decode(*plaintext, truth_t);
+                    engine->decode(*plaintext, truth_t[0]);
                     for (j=0; j<batch_size; j++)
-                        test_t[j] = -coeff * c->x[i] * truth_t[j] * 1.0 / (test_t[j]+1e-6);
-                    engine->encode(test_t, *plaintext);
+                        test_t[0][j] = -coeff * c->x[i] * truth_t[0][j] * 1.0 / (test_t[0][j]+1e-6);
+                    engine->encode(test_t[0], *plaintext);
                 	seal_add_inplace(y1->g_c[i], *plaintext);
                 }
 		    }
@@ -1879,41 +1901,52 @@ int kad_op_sigm(kad_node_t *p, int action)
         if (remote){
             assert(false);
         }else{
+
+#pragma omp parallel
+{
+#pragma omp for
             for (i = 0; i < n; i++){
-                engine->decrypt(q->x_c[i], *plaintext);
-                engine->decode(*plaintext, t);
-                for (j = 0; j < t.size(); ++j)
-                    t[j] = 1.0f / (1.0f + expf(-t[j]));
-                engine->encode(t, *plaintext);
-                engine->encrypt(*plaintext, p->x_c[i]);
-            }
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+                engine->decrypt(q->x_c[i], plaintext[thread_mod_id]);
+                engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
+                for (j = 0; j < t[thread_mod_id].size(); ++j)
+                    t[thread_mod_id][j] = 1.0f / (1.0f + expf(-t[thread_mod_id][j]));
+                engine->encode(t[thread_mod_id], plaintext[thread_mod_id]);
+                engine->encrypt(plaintext[thread_mod_id], p->x_c[i]);
+            }	
+}
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
         if (remote){
             assert(false);
         }
         else{
-			if(p->g_c[i].clean()){
-				q->g_c[i].clean() = true;
-			}else{			
-				for (i=0; i<n; i++){
-					engine->decrypt(p->x_c[i], *plaintext);
-					engine->decode(*plaintext, test_t);
-					engine->decrypt(p->g_c[i], *plaintext);
-					engine->decode(*plaintext, t);
-					for (j = 0; j < t.size(); ++j)
-						test_t[j] = t[j] * (test_t[j] * (1. - test_t[j]));
-					engine->encode(test_t, *plaintext);
-					seal_add_inplace(q->g_c[i], *plaintext);
+#pragma omp parallel
+{
+#pragma omp for
+			for (i=0; i<n; i++){
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+				if(p->g_c[i].clean()){
+					q->g_c[i].clean() = true;
+				}else{
+					engine->decrypt(p->x_c[i], plaintext[thread_mod_id]);
+					engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
+					engine->decrypt(p->g_c[i], plaintext[thread_mod_id]);
+					engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
+					for (j = 0; j < t[thread_mod_id].size(); ++j)
+						test_t[thread_mod_id][j] = t[thread_mod_id][j] * (test_t[thread_mod_id][j] * (1. - test_t[thread_mod_id][j]));
+					engine->encode(test_t[thread_mod_id], plaintext[thread_mod_id]);
+					seal_add_inplace(q->g_c[i], plaintext[thread_mod_id]);
 				}
 			}
+}
         }
 	}
 	return 0;
 }
-
 int kad_op_tanh(kad_node_t *p, int action)
 {
+/**
 	int i, n, j;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
@@ -1959,6 +1992,7 @@ int kad_op_tanh(kad_node_t *p, int action)
 			}
         }
 	}
+**/
 	return 0;
 }
 
@@ -1973,36 +2007,47 @@ int kad_op_relu(kad_node_t *p, int action)
         if (remote){
             assert(false);
         }else{
+#pragma omp parallel
+{
+#pragma omp for
             for (i = 0; i < n; i++){
-                engine->decrypt(q->x_c[i], *plaintext);
-                engine->decode(*plaintext, t);
-                for (j = 0; j < t.size(); ++j)
-                    t[j] = t[j] > 0.0f? t[j] : 0.0f;
-                engine->encode(t, *plaintext);
-                engine->encrypt(*plaintext, p->x_c[i]);
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+                engine->decrypt(q->x_c[i], plaintext[thread_mod_id]);
+                engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
+                for (j = 0; j < t[thread_mod_id].size(); ++j)
+                    t[thread_mod_id][j] = t[thread_mod_id][j] > 0.0f? t[thread_mod_id][j] : 0.0f;
+                engine->encode(t[thread_mod_id], plaintext[thread_mod_id]);
+                engine->encrypt(plaintext[thread_mod_id], p->x_c[i]);
             }
+
+}
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
         if (remote){
             assert(false);
         }
         else{
+#pragma omp parallel
+{
+#pragma omp for
             for (i=0; i<n; i++){
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
 				if(p->g_c[i].clean()){
 					q->g_c[i].clean() = true;
 				}else{
-					engine->decrypt(p->x_c[i], *plaintext);
-					engine->decode(*plaintext, test_t);
-					engine->decrypt(p->g_c[i], *plaintext);
-					engine->decode(*plaintext, t);
-					for (j = 0; j < t.size(); ++j)
-						test_t[j] = test_t[j] > 0.0f + 1e-6? t[j] : 0.0f;
-					engine->encode(test_t, *plaintext);
-					engine->encrypt(*plaintext, *ciphertext);
-					seal_add_inplace(q->g_c[i], *ciphertext);					
+					engine->decrypt(p->x_c[i], plaintext[thread_mod_id]);
+					engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
+					engine->decrypt(p->g_c[i], plaintext[thread_mod_id]);
+					engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
+					for (j = 0; j < t[thread_mod_id].size(); ++j)
+						test_t[thread_mod_id][j] = test_t[thread_mod_id][j] > 0.0f + 1e-6? t[thread_mod_id][j] : 0.0f;
+					engine->encode(test_t[thread_mod_id], plaintext[thread_mod_id]);
+					engine->encrypt(plaintext[thread_mod_id], ciphertext[thread_mod_id]);
+					seal_add_inplace(q->g_c[i], ciphertext[thread_mod_id]);					
 				}
 
             }
+}
         }
 	}
 	return 0;
@@ -2010,6 +2055,7 @@ int kad_op_relu(kad_node_t *p, int action)
 
 int kad_op_sin(kad_node_t *p, int action)
 {
+/**
 	int i, n, j;
 	kad_node_t *q = p->child[0];
 	n = kad_len(q);
@@ -2049,6 +2095,7 @@ int kad_op_sin(kad_node_t *p, int action)
 			}
         }
 	}
+**/
 	return 0;
 }
 
@@ -2068,8 +2115,8 @@ int kad_op_softmax(kad_node_t *p, int action)
             assert(false);
         }else{
             vector<vector<double>> raw_value(n1, vector<double>(batch_size, 0.));
-            vector<double> &y = test_t;
-            vector<double> &max = truth_t; 
+            vector<double> &y = test_t[0];
+            vector<double> &max = truth_t[0]; 
 			y.resize(batch_size);
 			max.resize(batch_size);
             for (j = 0; j < batch_size; ++j)
@@ -2406,7 +2453,6 @@ int kad_op_max2d(kad_node_t *p, int action)
 {
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0];
-	int batch_size = q->x_c[0].size();
 	if (action == KAD_SYNC_DIM) {
 		if (q->n_d != 3) return -1;
 		p->n_d = 3;
@@ -2414,52 +2460,79 @@ int kad_op_max2d(kad_node_t *p, int action)
 	} else if (action == KAD_ALLOC) {
 		p->gtmp = realloc(p->gtmp, kad_len(p) * sizeof(int));
 	} else if (action == KAD_FORWARD) {
+		int batch_size = q->x_c[0].size();
         if (remote){
             assert(false);
         }else{
-            int rest = 1, len, t, i;
+            int rest = 1, len, i;
             int *f = (int*)p->gtmp;
             len = kad_len(p);
             for (i = 0; i < len; ++i) p->x_c[i].clean() = true;
             for (i = 0; i < p->n_d - 2; ++i) rest *= p->d[i];
-            for (t = 0; t < rest; ++t) {
-                int i, j, k, l, m, p_row = p->d[p->n_d - 2], p_col = p->d[p->n_d - 1];
-
-                for (i = 0; i < p_row; ++i)
-                    for (j = 0; j < p_col; ++j){
-                        vector<double> max(batch_size, -FLT_MAX);
-                        int out_po = (t * p_row + i) * p_col + j;
-                        for (k = 0; k < aux[0].kernel_size; ++k){
-                            for (l = 0; l < aux[1].kernel_size; ++l){
-								//ii: current row 
-                                int ii = i * aux[0].stride + k - aux[0].pad[0];
-                                if (ii < 0 || ii >= q->d[p->n_d-2]) continue;
-								//v0: starting index in the current row
-								//v_end: ending index in the current row
-								//in_po: current input index
-								//out_po: current output index
-								//max: current max batch
-								//f: current used input index
-                                int v0 = (t * q->d[p->n_d - 2] + ii) * q->d[p->n_d - 1];
-                                int v_end = v0 + q->d[p->n_d - 1];
-                                int in_po = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0) + aux[1].stride * j;
-                                if (in_po >= v_end) continue;
-                                engine->decrypt(q->x_c[in_po], *plaintext);
-                                engine->decode(*plaintext, test_t);
-                                for ( m = 0; m < batch_size; m++)
-                                    if ( test_t[m] > max[m])
-                                        max[m] = test_t[m], f[out_po] = in_po;
-                            }
-						}
-                        engine->encode(max, *plaintext);
-                        engine->encrypt(*plaintext, p->x_c[out_po]); 
-                    }
-            }
+			int p_row = p->d[p->n_d - 2], p_col = p->d[p->n_d - 1];
+			int full_ii = rest * p_row * p_col;
+#pragma omp parallel
+{
+#pragma omp for
+			for (int ii = 0; ii < full_ii; ii++){
+				int t = ii / (p_row * p_col);
+				int i = (ii / p_col) % (p_row);
+				int j = (ii % p_col);
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+				//for (t = 0; t < rest; ++t) {
+				//	for (i = 0; i < p_row; ++i){
+				//		for (j = 0; j < p_col; ++j){
+							truth_t[thread_mod_id].resize(batch_size);
+							for (int k = 0; k < batch_size; k++)
+								truth_t[thread_mod_id][k] =  -FLT_MAX;
+							int out_po = ii;
+							int kernel_height = aux[0].kernel_size;
+							int kelnel_width = aux[1].kernel_size;
+							for (int k = 0; k < kernel_height; ++k){
+								for (int l = 0; l < kelnel_width; ++l){
+									//iii: current row 
+									int iii = i * aux[0].stride + k - aux[0].pad[0];
+									if (iii < 0 || iii >= q->d[p->n_d-2]) continue;
+									//v0: starting index in the current row
+									//v_end: ending index in the current row
+									//in_po: current input index
+									//out_po: current output index
+									//max: current max batch
+									//f: current used input index
+									int v0 = (t * q->d[p->n_d - 2] + iii) * q->d[p->n_d - 1];
+									int v_end = v0 + q->d[p->n_d - 1];
+									int in_po = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0) + aux[1].stride * j;
+									if (in_po >= v_end) continue;
+									engine->decrypt(q->x_c[in_po], plaintext[thread_mod_id]);
+									engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
+									for (int m = 0; m < batch_size; m++)
+										if ( test_t[thread_mod_id][m] > truth_t[thread_mod_id][m])
+											truth_t[thread_mod_id][m] = test_t[thread_mod_id][m], f[out_po] = in_po;
+								}
+							}
+							engine->encode(truth_t[thread_mod_id], plaintext[thread_mod_id]);
+							engine->encrypt(plaintext[thread_mod_id], p->x_c[out_po]); 
+				//		}
+				//	}
+				//}
+				
+			}
+}
         }
 	} else if (action == KAD_BACKWARD) {
-		int i, len, *f = (int*)p->gtmp;
-		len = kad_len(p);
-		for (i = 0; i < len; ++i) seal_add_inplace(q->g_c[f[i]],p->g_c[i]);
+		int *f = (int*)p->gtmp;
+		int in_len = kad_len(q);
+		int out_len = kad_len(p);
+// a makeshift to work around the data race on the input pixel.
+#pragma omp parallel
+{
+#pragma omp for
+		for (int i = 0; i < in_len; ++i){
+			for (int j = 0; j < out_len; ++j){
+				if(f[j] == i)seal_add_inplace(q->g_c[i],p->g_c[j]);
+			}
+		}
+}
 	}
 	return 0;
 }
@@ -2765,8 +2838,8 @@ void kad_check_grad(int n, kad_node_t **a, int from)
 						g0[k+j] = 0.0;
 					}else{
 						engine->decrypt(a[i]->g_c[j], *plaintext);
-						engine->decode(*plaintext, t);
-						g0[k+j] = t[0];
+						engine->decode(*plaintext, t[0]);
+						g0[k+j] = t[0][0];
 					}
 				}
 
@@ -2788,16 +2861,16 @@ void kad_check_grad(int n, kad_node_t **a, int from)
 	//get decrypted s1, firstly we need to sum the batch cost function. (model doesn't do that for efficientcy consideration.)
 	sum_vector(f_plus_c);
 	engine->decrypt(f_plus_c, *plaintext);
-	engine->decode(*plaintext, t);
-	f_plus = t[0];
+	engine->decode(*plaintext, t[0]);
+	f_plus = t[0][0];
 	sum_vector(f_minus_c);
 	engine->decrypt(f_minus_c, *plaintext);
-	engine->decode(*plaintext, t);
-	f_minus = t[0];
+	engine->decode(*plaintext, t[0]);
+	f_minus = t[0][0];
 	sum_vector(f0_c);
 	engine->decrypt(f0_c, *plaintext);
-	engine->decode(*plaintext, t);
-	f0 = t[0];
+	engine->decode(*plaintext, t[0]);
+	f0 = t[0][0];
 
 	s1 = .5f * (f_plus - f_minus);
 	std::fprintf(stderr, "Gradient check -- %g <=> %g @ %g -- ", s0/eps, s1/eps, f0);

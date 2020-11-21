@@ -9,6 +9,7 @@
 #include "util.hpp"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
+#include "omp.h"
 
 using namespace std;
 
@@ -35,7 +36,6 @@ int main(int argc, char *argv[])
 	kann_data_t *out = 0;
 	kann_t *ann = 0;
 	char *out_fn = 0, *in_fn = 0;
-	int max_parallel = 200;
 	float lr = 0.001f, frac_val = 0.1f, h_dropout = 0.0f;
     chrono::high_resolution_clock::time_point time_start, time_end;
 	chrono::microseconds inference_time(0);
@@ -92,21 +92,39 @@ int main(int argc, char *argv[])
                     seal_scheme::CKKS);
     engine = make_shared<SEALEngine>();
     engine->init(parms, standard_scale, false);
-	engine->max_slot() = 64;
+	engine->max_slot() = mini_size;
     size_t slot_count = engine->slot_count();
     cout <<"Poly modulus degree: " << poly_modulus_degree<< endl;
     cout << "Coefficient modulus: ";
     cout << endl;
     cout << "slot count: " << slot_count<< endl;
     cout << "scale: 2^" << standard_scale << endl;
-	plaintext = new SEALPlaintext(engine);
+	
+	int max_parallel = omp_get_max_threads();
+	cout << "max thread: " << max_parallel << endl;
+	plaintext = new SEALPlaintext[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		plaintext[i].init(engine);
+	}
 	ciphertext = new SEALCiphertext[max_parallel];
 	for (i = 0; i < max_parallel; i ++){
 		ciphertext[i].init(engine);
 	}
-	engine->zero = new SEALCiphertext(engine);
-	engine->encode(0, *plaintext);
-	engine->encrypt(*plaintext, *(engine->zero));
+	t = new vector<double>[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		t->resize(engine->max_slot());
+	}
+	test_t = new vector<double>[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		test_t->resize(engine->max_slot());
+	}
+	truth_t = new vector<double>[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		truth_t->resize(engine->max_slot());
+	}
+	//engine->zero = new SEALCiphertext(engine);
+	//engine->encode(0, *plaintext);
+	//engine->encrypt(*plaintext, *(engine->zero));
 	engine->lazy_mode() = z;
 	//1. read the model and data
 	kann_srand(seed);
@@ -328,7 +346,7 @@ total_samples = 128;
 	cnn_t = kad_feed(3, 1, 5, 5), cnn_t->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
 	cnn_t = kann_layer_conv2d(cnn_t, 1, 3, 3, 1, 1, 0, 0);
 
-	cnn_t = kad_max2d(cnn_t, 2, 2, 1, 1, 0, 0); // 2x2 kernel; 2x2 stride; 0x0 padding
+	cnn_t = kad_max2d(cnn_t, 2, 2, 1, 1, 0, 0); // 2x2 kernel; 1*1 stride; 0x0 padding
 	cnn_t = kad_relu(cnn_t); // 3x3 kernel; 1x1 stride; 0x0 padding
 	//cnn_t = kann_layer_dropout(cnn_t, 0.0);
 	cnn_ann = kann_new(kann_layer_cost(cnn_t, pseudo_image_label->n_col, KANN_C_CEM), 0);
@@ -413,8 +431,11 @@ total_samples = 128;
 
 
 	delete shuf;
-	delete plaintext;
+	delete[] plaintext;
 	delete[] ciphertext;
+	delete[] t;
+	delete[] truth_t;
+	delete[] test_t;
 	kann_data_free(out);
 	kann_data_free(in);
 	kann_delete(ann);

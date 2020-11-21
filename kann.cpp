@@ -13,10 +13,9 @@ extern bool remote;
 extern std::shared_ptr<SEALEngine> engine;
 extern SEALPlaintext *plaintext;
 extern SEALCiphertext *ciphertext;
-extern SEALCiphertext *zero;
-extern vector<double> t;
-extern vector<double> test_t;   
-extern vector<double> truth_t;
+extern vector<double> *t;
+extern vector<double> *test_t;   
+extern vector<double> *truth_t;
 
 /******************************************
  *** @@BASIC: fundamental KANN routines ***
@@ -229,8 +228,8 @@ static float kann_cost_core(kann_t *a, int cost_label, int cal_grad)
 		assert(false);
 	}else{
 		engine->decrypt(cost_c, *plaintext);
-		engine->decode(*plaintext, t);
-		cost = t[0];
+		engine->decode(*plaintext, t[0]);
+		cost = t[0][0];
 	}
 	return cost;
 }
@@ -428,6 +427,7 @@ kad_node_t *kann_layer_dense2(int *offset, kad_node_p *par, kad_node_t *in, int 
 	n0 = kad_len(in);
 	w = kann_new_leaf2(offset, par, KAD_VAR, 0.0f, w_is_encrypted, 2, n1, n0);
 	b = kann_new_leaf2(offset, par, KAD_VAR, 0.0f, b_is_encrypted, 1, n1);
+	//return kad_cmul(kad_add(in, b), w);
 	return kad_add(kad_cmul(in, w), b);
 }
 

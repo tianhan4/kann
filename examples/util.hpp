@@ -59,9 +59,9 @@ static inline void print_vector(std::vector<T> vec, size_t print_size = 4, int p
 
 void print_ciphertext(SEALCiphertext *cipher){
 	engine->decrypt(*cipher, *plaintext);
-	engine->decode(*plaintext, t);
-	cout << t.size() << endl;
-	print_vector(t);
+	engine->decode(*plaintext, t[0]);
+	cout << t[0].size() << endl;
+	print_vector(t[0]);
 }
 
 void print_model(kann_t * model, int from, bool grad){
@@ -84,8 +84,8 @@ void print_model(kann_t * model, int from, bool grad){
 			cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
 			for (j = 0; j < kad_len(model->v[i]); j++){
 				engine->decrypt(model->v[i]->x_c[j], *plaintext);
-				engine->decode(*plaintext, t);
-				print_vector(t, 4, 10);
+				engine->decode(*plaintext, t[0]);
+				print_vector(t[0], 4, 10);
 			}
 		}
 		else if (kad_is_back(model->v[i])){
@@ -95,8 +95,8 @@ void print_model(kann_t * model, int from, bool grad){
 				cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
 				for (j = 0; j < kad_len(model->v[i]); j++){
 					engine->decrypt(model->v[i]->x_c[j], *plaintext);
-					engine->decode(*plaintext, t);
-					print_vector(t, 4, 10);
+					engine->decode(*plaintext, t[0]);
+					print_vector(t[0], 4, 10);
 				}
 				if(grad){
 					cout << "encrytped grad:" << endl;
@@ -105,8 +105,8 @@ void print_model(kann_t * model, int from, bool grad){
 							cout << "clean grad" << endl;
 						}else{
 							engine->decrypt(model->v[i]->g_c[j], *plaintext);
-							engine->decode(*plaintext, t);
-							print_vector(t, 4, 10);
+							engine->decode(*plaintext, t[0]);
+							print_vector(t[0], 4, 10);
 						}
 					}
 	

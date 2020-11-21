@@ -97,10 +97,9 @@ using namespace hewrapper;
 extern std::shared_ptr<SEALEngine> engine;
 extern SEALPlaintext *plaintext;
 extern SEALCiphertext *ciphertext;
-extern SEALCiphertext *zero;
-extern vector<double> t;
-extern vector<double> test_t;   
-extern vector<double> truth_t;
+extern vector<double> *t;
+extern vector<double> *test_t;   
+extern vector<double> *truth_t;
 
 typedef struct branch_wave_t{
     uint8_t wave_id; //identify wave for each branch.

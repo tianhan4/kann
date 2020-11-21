@@ -9,21 +9,9 @@
 #include "kann.h"
 #include "util.hpp"
 #include "kann_extra/kann_data.h"
+#include <omp.h>
 
 using namespace std;
-
-
-static kann_t *model_gen(int n_in, int n_out, int loss_type, int n_h_layers, int n_h_neurons, float h_dropout, bool w_is_encrypted, bool b_is_encrypted)
-{
-    int i;
-    kad_node_t *t;
-    t = kann_layer_input(n_in);
-    for (i = 0; i < n_h_layers; ++i)
-        t = kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted, b_is_encrypted));
-        //t = kann_layer_dropout(kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted, b_is_encrypted)), h_dropout);
-         //better put the last layer all encrypted. For we can infer the i-1 activations from the gradients of w, due to the situation where only 1 node output.
-    return kann_new(kann_layer_cost(t, n_out, loss_type, true, true), 0);
-}
 
 static kann_t *lenet_gen(unsigned int n_labels)
 {
@@ -32,12 +20,12 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
+    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1,true);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
-    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
+    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0,true);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
-    lenet = kad_relu(kann_layer_dense(lenet, 120));
-    lenet = kad_relu(kann_layer_dense(lenet, 84));
+    lenet = kad_relu(kann_layer_dense(lenet, 120,true,true));
+    lenet = kad_relu(kann_layer_dense(lenet, 84,true,true));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
@@ -49,12 +37,11 @@ int main(int argc, char *argv[])
 {
     //0. set the environment
     int max_epoch = 50, mini_size = 64, max_drop_streak = 10, loss_type = KANN_C_CEB;
-    int i, j, k, c, n_h_neurons = 64, n_h_layers = 1, seed = 11, n_threads = 1;
+    int i, j, k, c, n_h_neurons = 64, n_h_layers = 1, seed = 11, n_threads = 1, lazy_mode;
     int total_samples;
     kann_data_t *in = 0;
     kann_data_t *out = 0;
     kann_t *ann = 0;
-	int max_parallel = 1000;
     char *out_fn = 0, *in_fn = 0;
     float lr = 0.001f, frac_val = 0.1f, h_dropout = 0.0f;
     chrono::high_resolution_clock::time_point time_start, time_end;
@@ -63,7 +50,7 @@ int main(int argc, char *argv[])
     chrono::microseconds training_time(0);
     cout << "start reading parameters" << endl;
     cout << "argc:" << argc << endl;
-    while ((c = getopt(argc, argv, "n:l:s:r:m:B:d:v:M")) >= 0) {
+    while ((c = getopt(argc, argv, "n:l:s:r:m:B:d:v:z:M")) >= 0) {
         if (c == 'n') n_h_neurons = atoi(optarg);
         else if (c == 'l') n_h_layers = atoi(optarg);
         else if (c == 's') seed = atoi(optarg);
@@ -74,6 +61,7 @@ int main(int argc, char *argv[])
         else if (c == 'B') mini_size = atoi(optarg);
         else if (c == 'd') h_dropout = atof(optarg);
         else if (c == 'v') frac_val = atof(optarg);
+        else if (c == 'z') lazy_mode = atoi(optarg);
         else if (c == 'M') loss_type = KANN_C_CEM;
         //else if (c == 't') n_threads = atoi(optarg);
     }
@@ -94,6 +82,7 @@ int main(int argc, char *argv[])
         fprintf(fp, "    -r FLOAT    learning rate [%g]\n", lr);
         fprintf(fp, "    -m INT      max number of epochs [%d]\n", max_epoch);
         fprintf(fp, "    -B INT      mini-batch size [%d]\n", mini_size);
+        fprintf(fp, "    -z int      lazy mode [%d]\n", lazy_mode);
         fprintf(fp, "    -v FLOAT    fraction of data used for validation [%g]\n", frac_val);
         //fprintf(fp, "    -t INT      number of threads [%d]\n", n_threads);
         return 1;
@@ -109,22 +98,41 @@ int main(int argc, char *argv[])
                     seal_scheme::CKKS);
     engine = make_shared<SEALEngine>();
     engine->init(parms, standard_scale, false);
-    engine->max_slot() = 64;
+	engine->max_slot() = mini_size;
     size_t slot_count = engine->slot_count();
     cout <<"Poly modulus degree: " << poly_modulus_degree<< endl;
     cout << "Coefficient modulus: ";
     cout << endl;
     cout << "slot count: " << slot_count<< endl;
     cout << "scale: 2^" << standard_scale << endl;
-    plaintext = new SEALPlaintext(engine);
+
+	int max_parallel = omp_get_max_threads();
+	cout << "max thread: " << max_parallel << endl;
+	plaintext = new SEALPlaintext[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		plaintext[i].init(engine);
+	}
 	ciphertext = new SEALCiphertext[max_parallel];
 	for (i = 0; i < max_parallel; i ++){
 		ciphertext[i].init(engine);
 	}
+	t = new vector<double>[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		t->resize(engine->max_slot());
+	}
+	test_t = new vector<double>[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		test_t->resize(engine->max_slot());
+	}
+	truth_t = new vector<double>[max_parallel];
+	for (i = 0; i < max_parallel; i ++){
+		truth_t->resize(engine->max_slot());
+	}
+    //engine->zero = NULL;
     engine->zero = new SEALCiphertext(engine);
     engine->encode(0, *plaintext);
     engine->encrypt(*plaintext, *(engine->zero));
-    engine->lazy_mode() = true;
+    engine->lazy_mode() = lazy_mode;
     //1. read the model and data
     kann_srand(seed);
     in = kann_data_read(argv[optind]);
@@ -221,6 +229,7 @@ int main(int argc, char *argv[])
     SEALCiphertext * bind_label = image_labels_c[0].data();  
     kann_feed_bind(cnn_ann, KANN_F_IN, 0, &bind_data);
     kann_feed_bind(cnn_ann, KANN_F_TRUTH, 0, &bind_label);
+    train_cost = kann_cost(cnn_ann, 0, 1);
     time_start = chrono::high_resolution_clock::now();
     train_cost = kann_cost(cnn_ann, 0, 1);
     time_end = chrono::high_resolution_clock::now();
@@ -233,12 +242,18 @@ int main(int argc, char *argv[])
     
     //kann_train_fnn1(ann, lr, mini_size, max_epoch, max_drop_streak, frac_val, in->n_row, in->x, out->x);
 
-    kann_data_free(in);
-    kann_data_free(out);
-    delete shuf;
-    delete plaintext;
-    delete[] ciphertext;
-    kann_delete(ann);
-    kann_delete(cnn_ann);
-    return 0;
+
+
+    //delete engine->zero;
+	delete shuf;
+	delete[] plaintext;
+	delete[] ciphertext;
+	delete[] t;
+	delete[] truth_t;
+	delete[] test_t;
+	kann_data_free(out);
+	kann_data_free(in);
+	kann_delete(ann);
+	kann_delete(cnn_ann);
+	return 0;
 }
