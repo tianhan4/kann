@@ -1,6 +1,6 @@
 -include ./HEWrapper/hewrapper/make/env.mk
 CC=			g++
-CFLAGS=		-g -Wall -O2 -fPIC -std=c++17
+CFLAGS=		-g -Wall -O2 -fPIC -fopenmp -std=c++17
 CFLAGS_LIB=	#-ansi -pedantic -Wno-long-long # ANSI C does not have inline which affects performance a little bit
 INCLUDES :=	-I. -I./HEWrapper/hewrapper/include  -I./HEWrapper/hewrapper/src/seawrapper -I./HEWrapper/hewrapper/src/sealwrapper/include/SEAL-$(SEAL_VER)
 EXE=		examples/test examples/lenet examples/loader_test #examples/mnist-cnn examples/inspect

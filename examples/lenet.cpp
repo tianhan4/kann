@@ -20,12 +20,12 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1,true);
+    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1,false);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
-    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0,true);
+    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0,false);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
-    lenet = kad_relu(kann_layer_dense(lenet, 120,true,true));
-    lenet = kad_relu(kann_layer_dense(lenet, 84,true,true));
+    lenet = kad_relu(kann_layer_dense(lenet, 120,false,true));
+    lenet = kad_relu(kann_layer_dense(lenet, 84,false,true));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
@@ -37,32 +37,30 @@ int main(int argc, char *argv[])
 {
     //0. set the environment
     int max_epoch = 50, mini_size = 64, max_drop_streak = 10, loss_type = KANN_C_CEB;
-    int i, j, k, c, n_h_neurons = 64, n_h_layers = 1, seed = 11, n_threads = 1, lazy_mode;
+    int i, j, k, c, seed = 11, n_threads = 1, lazy_mode = 1;
     int total_samples;
+    int mode = 0;
     kann_data_t *in = 0;
     kann_data_t *out = 0;
     kann_t *ann = 0;
     char *out_fn = 0, *in_fn = 0;
-    float lr = 0.001f, frac_val = 0.1f, h_dropout = 0.0f;
+    float lr = 0.001f, frac_val = 0.1f;
     chrono::high_resolution_clock::time_point time_start, time_end;
     chrono::microseconds inference_time(0);
     chrono::microseconds training_step_time(0);
     chrono::microseconds training_time(0);
     cout << "start reading parameters" << endl;
     cout << "argc:" << argc << endl;
-    while ((c = getopt(argc, argv, "n:l:s:r:m:B:d:v:z:M")) >= 0) {
-        if (c == 'n') n_h_neurons = atoi(optarg);
-        else if (c == 'l') n_h_layers = atoi(optarg);
-        else if (c == 's') seed = atoi(optarg);
+    while ((c = getopt(argc, argv, "s:r:m:B:v:z:M:")) >= 0) {
+        if (c == 's') seed = atoi(optarg);
         //else if (c == 'i') in_fn = optarg;
         //else if (c == 'o') out_fn = optarg;
         else if (c == 'r') lr = atof(optarg);
         else if (c == 'm') max_epoch = atoi(optarg);
         else if (c == 'B') mini_size = atoi(optarg);
-        else if (c == 'd') h_dropout = atof(optarg);
         else if (c == 'v') frac_val = atof(optarg);
         else if (c == 'z') lazy_mode = atoi(optarg);
-        else if (c == 'M') loss_type = KANN_C_CEM;
+        else if (c == 'M') mode = atoi(optarg);
         //else if (c == 't') n_threads = atoi(optarg);
     }
     //argc - optind < 1, which means no more other arguments followed, i.e., training feature/label files missing.
@@ -74,11 +72,8 @@ int main(int argc, char *argv[])
         //fprintf(fp, "    -i FILE     read trained model from FILE []\n");
         //fprintf(fp, "    -o FILE     save trained model to FILE []\n");
         fprintf(fp, "    -s INT      random seed [%d]\n", seed);
-        fprintf(fp, "    -l INT      number of hidden layers [%d]\n", n_h_layers);
-        fprintf(fp, "    -n INT      number of hidden neurons per layer [%d]\n", n_h_neurons);
-        fprintf(fp, "    -d FLOAT    dropout at the hidden layer(s) [%g]\n", h_dropout);
-        fprintf(fp, "    -M          use multi-class cross-entropy (binary by default)\n");
         fprintf(fp, "  Model training:\n");
+        fprintf(fp, "    -M INT     working mode: 0-all optimized 1-zero_encryption 2-lazy_relinearize 3-no optimization [%g]\n", mode);
         fprintf(fp, "    -r FLOAT    learning rate [%g]\n", lr);
         fprintf(fp, "    -m INT      max number of epochs [%d]\n", max_epoch);
         fprintf(fp, "    -B INT      mini-batch size [%d]\n", mini_size);
@@ -128,10 +123,15 @@ int main(int argc, char *argv[])
 	for (i = 0; i < max_parallel; i ++){
 		truth_t->resize(engine->max_slot());
 	}
-    //engine->zero = NULL;
-    engine->zero = new SEALCiphertext(engine);
-    engine->encode(0, *plaintext);
-    engine->encrypt(*plaintext, *(engine->zero));
+    if(mode == 1 || mode ==0){
+        engine->zero = new SEALCiphertext(engine);
+        engine->encode(0, *plaintext);
+        engine->encrypt(*plaintext, *(engine->zero));
+    }else{
+        engine->zero = NULL;
+    }
+    if(mode == 2 || mode == 0) engine->lazy_relinearization() = true;
+    else engine->lazy_relinearization() = false;
     engine->lazy_mode() = lazy_mode;
     //1. read the model and data
     kann_srand(seed);
