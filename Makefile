@@ -29,11 +29,11 @@ hewrapper:
 kann_extra/kann_data.o: kann_extra/kann_data.cpp hewrapper
 		$(CC) -c $(CFLAGS) -DHAVE_ZLIB $< -o $@
 
-examples/test: examples/test.o kautodiff.o kann.o kann_extra/kann_data.o util.o
-		$(CC) $(CFLAGS) -o $@ examples/test.o kautodiff.o kann.o kann_extra/kann_data.o util.o $(LIBS)
+examples/test: examples/test.o kautodiff.o kann.o kann_extra/kann_data.o
+		$(CC) $(CFLAGS) -o $@ examples/test.o kautodiff.o kann.o kann_extra/kann_data.o $(LIBS)
 
-examples/lenet: examples/lenet.o kautodiff.o kann.o kann_extra/kann_data.o util.o
-		$(CC) $(CFLAGS) -o $@ examples/lenet.o kautodiff.o kann.o kann_extra/kann_data.o util.o $(LIBS)
+examples/lenet: examples/lenet.o kautodiff.o kann.o kann_extra/kann_data.o
+		$(CC) $(CFLAGS) -o $@ examples/lenet.o kautodiff.o kann.o kann_extra/kann_data.o $(LIBS)
 
 examples/loader_test: examples/loader_test.o kautodiff.o kann.o kann_extra/kann_data.o
 		$(CC) $(CFLAGS) -o $@ examples/loader_test.o kautodiff.o kann.o kann_extra/kann_data.o util.o $(LIBS)
