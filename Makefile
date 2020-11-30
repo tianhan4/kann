@@ -12,7 +12,10 @@ LIBS=		-L./HEWrapper/hewrapper -l$(HW_LINK) -L./HEWrapper/hewrapper/src/sealwrap
 .cpp.o:
 		$(CC) -c $(CFLAGS) $(INCLUDES) $(CPPFLAGS) $< -o $@
 
-all: clean hewrapper kautodiff.o kann.o kann_extra/kann_data.o $(EXE)
+all: clean hewrapper kautodiff.o kann.o kann_extra/kann_data.o util.o $(EXE)
+
+util.o: util.cpp
+		$(CC) -c $(CFLAGS) $(CFLAGS_LIB) $(INCLUDES) $(CPPFLAGS) -o $@ $<
 
 kautodiff.o: kautodiff.cpp hewrapper
 		$(CC) -c $(CFLAGS) $(CFLAGS_LIB) $(INCLUDES) $(CPPFLAGS) -o $@ $<
@@ -33,7 +36,7 @@ examples/lenet: examples/lenet.o kautodiff.o kann.o kann_extra/kann_data.o
 		$(CC) $(CFLAGS) -o $@ examples/lenet.o kautodiff.o kann.o kann_extra/kann_data.o $(LIBS)
 
 examples/loader_test: examples/loader_test.o kautodiff.o kann.o kann_extra/kann_data.o
-		$(CC) $(CFLAGS) -o $@ examples/loader_test.o kautodiff.o kann.o kann_extra/kann_data.o $(LIBS)
+		$(CC) $(CFLAGS) -o $@ examples/loader_test.o kautodiff.o kann.o kann_extra/kann_data.o util.o $(LIBS)
 
 # examples/inspect:examples/inspect.o kautodiff.o kann.o
 # 		$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
