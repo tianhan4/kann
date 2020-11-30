@@ -15,8 +15,63 @@
 
 using namespace std;
 
+
+void save_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename, bool is_rotate, bool is_decrypt){
+	
+	ofstream en;
+	en.open(filename, ios::binary);
+	engine->save(en, is_rotate, is_decrypt);
+	en.close();
+}
+
+int load_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename){
+
+	ifstream en;
+	en.open(filename, ios::binary);
+	if (!en.is_open()) {
+		cout << filename << " not exist" << endl;
+		return -1;
+	}
+	engine->load(en);
+	en.close();
+	return 1;
+}
+
+// Save all things in the ciphertext, as well as the engine
+void save_ciphertext(SEALCiphertext* ciphertext, size_t cipher_num, string filename)
+{
+	ofstream ct;
+	int i;
+	if(!ciphertext)
+		return;
+	ct.open(filename, ios::binary);
+	for(i = 0; i < cipher_num; i++){
+		ciphertext[i].save(ct);
+	}
+	ct.close();
+};
+
+//Load all things, maybe also the engine
+int load_ciphertext(SEALCiphertext* ciphertext, std::shared_ptr<hewrapper::SEALEngine> engine, size_t cipher_num, string filename)
+{
+	ifstream ct;
+	int i;
+  	ct.open(filename, ios::binary);
+	if (!ct.is_open()) {
+		cout << filename << " not exist" << endl;
+		return -1;
+	}
+	for(i = 0; i < cipher_num; i++){
+		ciphertext[i].load(ct, engine);
+		ciphertext[i].init(engine);
+	}
+	ct.close();
+	
+	return 0;
+}
+
 template<typename T>
-static inline void print_vector(std::vector<T> vec, size_t print_size, int prec)
+inline void print_vector(std::vector<T> vec, size_t print_size, int prec)
 {
     /*
     Save the formatting information for std::cout.
@@ -132,30 +187,6 @@ void print_model(kann_t * model, int from, bool grad){
 	}
 }
 
-// TODO: it should move to HEWrapper
-void save_ciphertext(SEALCiphertext& ciphertext, string filename)
-{
-	ofstream ct;
-	ct.open(filename, ios::binary);
-	ciphertext.ciphertext().save(ct);
-	ct.close();
-};
-
-// TODO: it should move to HEWrapper
-int load_ciphertext(SEALCiphertext& ciphertext, string filename)
-{
-	ifstream ct;
-  	ct.open(filename, ios::binary);
-	if (!ct.is_open()) {
-		cout << filename << " not exist" << endl;
-		return -1;
-	}
-    // TODO: maybe some wrapper attributes should be set
-  	ciphertext.ciphertext().load(*(engine->get_context()->get_sealcontext()), ct);
-	ct.close();
-	return 0;
-}
-
 // is_label: 0 load data, 1 load label
 int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, int is_label)
 {
@@ -189,7 +220,7 @@ int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, in
 	ciphertext_vec.resize(data_num);
 	for (i = 0; i < data_num; ++i) {
 		path = dir + "/" + (is_label ? LABEL_FILE_PREFIX : DATA_FILE_PREFIX) + to_string(i);
-		if (load_ciphertext(ciphertext_vec[i], path)) {
+		if (load_ciphertext(&ciphertext_vec[i], engine, 1, path)) {
 			return -1;
 		}
 	}
@@ -234,13 +265,13 @@ int batch_save(int left_sample_num, int mini_size, int& current_cipher_id, int& 
 			engine->encode(image_features[j], plain_tmp);
 			engine->encrypt(plain_tmp, cipher_tmp);
 			filename = batch_dir + "/" + DATA_FILE_PREFIX + to_string(j);
-			save_ciphertext(cipher_tmp, filename);
+			save_ciphertext(&cipher_tmp, 1, filename);
 		}
 		for (j = 0; j < label->n_col; j++){
 			engine->encode(image_labels[j], plain_tmp);
 			engine->encrypt(plain_tmp, cipher_tmp);
 			filename = batch_dir + "/" + LABEL_FILE_PREFIX + to_string(j);
-			save_ciphertext(cipher_tmp, filename);
+			save_ciphertext(&cipher_tmp, 1, filename);
 		}
 		current_cipher_id ++;
 		current_sample_id += batch_size;

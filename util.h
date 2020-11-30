@@ -10,21 +10,24 @@ using namespace std;
 #define LABEL_FILE_PREFIX	"label_"
 
 template<typename T>
-static inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3);
+inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3);
 
 void print_ciphertext(SEALCiphertext *cipher);
 
 void print_model(kann_t * model, int from, bool grad);
 
-// TODO: it should move to HEWrapper
-void save_ciphertext(SEALCiphertext& ciphertext, string filename);
-
-// TODO: it should move to HEWrapper
-int load_ciphertext(SEALCiphertext& ciphertext, string filename);
-
 // is_label: 0 load data, 1 load label
 int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, int is_label);
 
 int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *data, kann_data_t *label, string output_dir, vector<int> &shuf);
+
+void save_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename, bool is_rotate = true, bool is_decrypt = true);
+
+int load_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename);
+
+void save_ciphertext(SEALCiphertext* ciphertext, size_t cipher_num, string filename);
+
+int load_ciphertext(SEALCiphertext* ciphertext, std::shared_ptr<hewrapper::SEALEngine> engine, size_t cipher_num, string filename);
+
 
 #endif
