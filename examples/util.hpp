@@ -134,31 +134,62 @@ void print_model(kann_t * model, int from, bool grad){
 	}
 }
 
-// TODO: it should move to HEWrapper
-void save_ciphertext(SEALCiphertext& ciphertext, string filename)
+void save_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename, bool is_rotate = true, bool is_decrypt = true){
+	
+	ofstream en;
+	en.open(filename, ios::binary);
+	engine->save(en, is_rotate, is_decrypt);
+	en.close();
+}
+
+int load_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename){
+
+	ifstream en;
+	en.open(filename, ios::binary);
+	if (!en.is_open()) {
+		cout << filename << " not exist" << endl;
+		return -1;
+	}
+	engine->load(en);
+	en.close();
+	return 1;
+}
+
+// Save all things in the ciphertext, as well as the engine
+void save_ciphertext(SEALCiphertext* ciphertext, size_t cipher_num, string filename)
 {
 	ofstream ct;
+	int i;
+	if(!ciphertext)
+		return;
 	ct.open(filename, ios::binary);
-	ciphertext.ciphertext().save(ct);
+	for(i = 0; i < cipher_num; i++){
+		ciphertext[i].save(ct);
+	}
 	ct.close();
 };
 
-// TODO: it should move to HEWrapper
-int load_ciphertext(SEALCiphertext& ciphertext, string filename)
+//Load all things, maybe also the engine
+int load_ciphertext(SEALCiphertext* ciphertext, std::shared_ptr<hewrapper::SEALEngine> engine, size_t cipher_num, string filename)
 {
 	ifstream ct;
+	int i;
   	ct.open(filename, ios::binary);
 	if (!ct.is_open()) {
 		cout << filename << " not exist" << endl;
 		return -1;
 	}
-    // TODO: maybe some wrapper attributes should be set
-  	ciphertext.ciphertext().load(*(engine->get_context()->get_sealcontext()), ct);
+	for(i = 0; i < cipher_num; i++){
+		ciphertext[i].load(ct, engine);
+		ciphertext[i].init(engine);
+	}
 	ct.close();
+	
 	return 0;
 }
 
 // is_label: 0 load data, 1 load label
+/**
 int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, int is_label)
 {
 	int i;
@@ -198,7 +229,9 @@ int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, in
 
 	return data_num;
 }
+**/
 
+/**
 int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *data, kann_data_t *label, string output_dir, vector<int> &shuf)
 {
 	int i, j, k, ret = -1;
@@ -255,7 +288,7 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 				image_features[j][k%batch_size] = data->x[shuf[k]][j];			
 			}
 			for (j = 0; j < label->n_col; j++){
-				image_labels[j][k] = label->x[shuf[k]][j];			
+				image_labels[j][k%batch_size] = label->x[shuf[k]][j];			
 			}
 		}
 
@@ -285,3 +318,4 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 exit:
 	return ret;
 }
+**/

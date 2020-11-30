@@ -44,6 +44,33 @@ int check_vector(const vector<double>& a, float **b, const vector<int> &shuf, in
 	return 0;
 }
 
+void test_read_and_write(){
+    SEALCiphertext op1, op2;
+    SEALCiphertext result;
+    SEALPlaintext op1_p, op2_p, result_p;
+    vector<double> op1_v{1,2,3,4,5};
+    vector<double> op2_v{5,4,3,2,1};
+    vector<double> result_v;
+    engine->encode(op1_v, op1_p);
+    engine->encode(op2_v, op2_p);
+    engine->encrypt(op1_p, op1);
+    engine->encrypt(op2_p, op2);
+    // 1. save the engine 2. save the ciphertext
+    SEALCiphertext array[] = {op1, op2};
+    save_engine(engine, "engine.save");
+    save_ciphertext(array, 2, "ciphertext.save");
+
+    engine = make_shared<SEALEngine>();
+    // 1. load the engine 2. load the ciphertext
+    load_engine(engine, "engine.save");
+    SEALCiphertext * array2 = new SEALCiphertext[2];
+    load_ciphertext(array2, engine, 2, "ciphertext.save");
+    seal_add(array2[0], array2[1], result);
+    engine->decrypt(result, result_p);
+    engine->decode(result_p, result_v);
+    print_vector(result_v);    
+}
+
 int main(int argc, char *argv[])
 {
     int i, j, ret_size;
@@ -68,7 +95,9 @@ int main(int argc, char *argv[])
     }
 
     setup_engine();
+    test_read_and_write();
 
+/**
     kann_srand(seed);
 	data = kann_data_read(argv[1]);
     label = kann_data_read(argv[2]);
@@ -125,6 +154,6 @@ int main(int argc, char *argv[])
 exit:
     kann_data_free(data);
     kann_data_free(label);
-
+**/
     return 0;
 }
