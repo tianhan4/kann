@@ -6,7 +6,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
-#include "util.hpp"
+#include "util.h"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
 #include "omp.h"

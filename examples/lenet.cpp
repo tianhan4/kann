@@ -7,7 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include "kann.h"
-#include "util.hpp"
+#include "util.h"
 #include "kann_extra/kann_data.h"
 #include <omp.h>
 
