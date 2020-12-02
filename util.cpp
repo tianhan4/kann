@@ -188,14 +188,10 @@ void print_model(kann_t * model, int from, bool grad){
 }
 
 // is_label: 0 load data, 1 load label
-int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, int is_label)
+int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, int size, string dir, int is_label)
 {
-	int i;
-	struct dirent *filename;
 	string path;
-	int data_num;
 	struct stat s_buf;
-	DIR *dp;
 
 	stat(dir.c_str(),&s_buf);
 	if (!S_ISDIR(s_buf.st_mode)) {
@@ -204,28 +200,18 @@ int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, string dir, in
 	}
 
 	ciphertext_vec.clear();
-	data_num = 0;
+	ciphertext_vec.resize(size);
 
-	dp = opendir(dir.c_str());
-	while((filename = readdir(dp))) {
-		if ((is_label && strncasecmp(filename->d_name, LABEL_FILE_PREFIX, strlen(LABEL_FILE_PREFIX)) == 0)
-			|| (!is_label && strncasecmp(filename->d_name, DATA_FILE_PREFIX, strlen(DATA_FILE_PREFIX)) == 0)) {
-				++data_num;
-		}
-		else {
-			continue;
-		}
+	if (is_label) {
+		path = dir + '/' + LABEL_FILE;
+	}
+	else {
+		path = dir + '/' + DATA_FILE;
 	}
 
-	ciphertext_vec.resize(data_num);
-	for (i = 0; i < data_num; ++i) {
-		path = dir + "/" + (is_label ? LABEL_FILE_PREFIX : DATA_FILE_PREFIX) + to_string(i);
-		if (load_ciphertext(&ciphertext_vec[i], engine, 1, path)) {
-			return -1;
-		}
-	}
-
-	return data_num;
+	load_ciphertext(ciphertext_vec.data(), engine, size, path);
+	
+	return size;
 }
 
 int batch_save(int left_sample_num, int mini_size, int& current_cipher_id, int& current_sample_id,
@@ -233,8 +219,8 @@ int batch_save(int left_sample_num, int mini_size, int& current_cipher_id, int& 
 {
 	int j, k;
 	int batch_size;
-	SEALCiphertext cipher_tmp(engine);
-	SEALPlaintext plain_tmp(engine);
+	vector<SEALCiphertext> cipher_data, cipher_label;
+	SEALPlaintext plain_data(engine), plain_label(engine);
 	string batch_dir, filename;
 	vector<vector<double>> image_features(data->n_col);
 	vector<vector<double>> image_labels(label->n_col);
@@ -261,18 +247,26 @@ int batch_save(int left_sample_num, int mini_size, int& current_cipher_id, int& 
 			cout << "fail to create dir " << batch_dir << endl;
 			return -1;
 		}
+
+		cipher_data.resize(data->n_col, SEALCiphertext(engine));
 		for (j = 0; j < data->n_col; j++){
-			engine->encode(image_features[j], plain_tmp);
-			engine->encrypt(plain_tmp, cipher_tmp);
-			filename = batch_dir + "/" + DATA_FILE_PREFIX + to_string(j);
-			save_ciphertext(&cipher_tmp, 1, filename);
+			engine->encode(image_features[j], plain_data);
+			engine->encrypt(plain_data, cipher_data[j]);
+			// filename = batch_dir + "/" + DATA_FILE_PREFIX + to_string(j);
+			// save_ciphertext(&cipher_tmp, 1, filename);
 		}
+		filename = batch_dir + "/" + DATA_FILE;
+		save_ciphertext(cipher_data.data(), data->n_col, filename);
+
+		cipher_label.resize(label->n_col, SEALCiphertext(engine));
 		for (j = 0; j < label->n_col; j++){
-			engine->encode(image_labels[j], plain_tmp);
-			engine->encrypt(plain_tmp, cipher_tmp);
-			filename = batch_dir + "/" + LABEL_FILE_PREFIX + to_string(j);
-			save_ciphertext(&cipher_tmp, 1, filename);
+			engine->encode(image_labels[j], plain_label);
+			engine->encrypt(plain_label, cipher_label[j]);
+			// filename = batch_dir + "/" + LABEL_FILE_PREFIX + to_string(j);
+			// save_ciphertext(&cipher_tmp, 1, filename);
 		}
+		filename = batch_dir + "/" + LABEL_FILE;
+		save_ciphertext(cipher_label.data(), label->n_col, filename);
 		current_cipher_id ++;
 		current_sample_id += batch_size;
 		left_sample_num -= batch_size;
@@ -285,6 +279,7 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 {
 	int i, ret = -1;
 	int left_sample_num, current_sample_id, current_cipher_id, cipher_num, sample_size;
+	string engine_file;
 
 	// struct stat s_buf;
 
@@ -312,6 +307,9 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 
 	for (i = 0; i < total_samples; ++i) shuf[i] = i;
 	// kann_shuffle(total_samples, &shuf[0]);
+
+	engine_file = output_dir + "/" + ENGINE_FILE;
+	save_engine(engine, engine_file);
 
 	//batching: in secure training we can use different batch size for every batch. 
 	left_sample_num = total_samples;

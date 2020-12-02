@@ -197,7 +197,7 @@ kad_node_t *kann_layer_dropout2(int *offset, kad_node_p *par, kad_node_t *t, flo
 
 /* operations on network with a single input node and a single output node */
 int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, float frac_val, int n, 
-SEALCiphertext **_x, SEALCiphertext **_y, float ** _truth);
+					const string& base_dir, int data_size, int label_size, vector<vector<float>>& _truth);
 float kann_cost_fnn1(kann_t *ann, int n, SEALCiphertext **x, SEALCiphertext **y);
 SEALCiphertext *kann_apply1(kann_t *a, SEALCiphertext *x_c);
 
@@ -207,4 +207,8 @@ void kann_save(const char *fn, kann_t *ann);
 kann_t *kann_load_fp(FILE *fp);
 kann_t *kann_load(const char *fn);
 void init_environment(std::shared_ptr<SEALEngine> input_engine);
+
+/* new add */
+void kann_SGD(int n, float h0, const float *h, const float *g, float *t);
+void kann_SGD(int n, float h0, const float *h, SEALCiphertext *g, SEALCiphertext *t);
 #endif

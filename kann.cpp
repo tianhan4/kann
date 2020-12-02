@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iomanip>
 #include "kann.h"
+#include "util.h"
 
 int kann_verbose = 3;
 extern bool remote;
@@ -602,11 +603,15 @@ float kann_grad_clip(float thres, int n, float *g)
 //So we can count the training time.
 //n : the number of *ciphertext arrays. Real total sample = n * *ciphertext.size
 int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, float frac_val, int n, 
-SEALCiphertext **_x, SEALCiphertext **_y, float ** _truth)
+					const string& base_dir, int data_size, int label_size, vector<vector<float>>& _truth)
 {
 	int i, j, k,  n_train, n_val, n_in, n_out, n_var, n_encrypted_var, n_const, drop_streak = 0, min_set = 0;
 	float min_val_cost = FLT_MAX, *min_x, *min_c;
+	string batch_dir;
 
+	vector<SEALCiphertext> _x(data_size);
+    vector<SEALCiphertext> _y(label_size);
+	SEALCiphertext *x_ptr, *y_ptr;
 	SEALCiphertext *min_x_c;
 
 	n_in = kann_dim_in(ann);
@@ -616,23 +621,12 @@ SEALCiphertext **_x, SEALCiphertext **_y, float ** _truth)
 	n_encrypted_var = kann_encrypted_var(ann);
 	n_const = kann_size_const(ann);
 
-	//r = (float*)calloc(n_var, sizeof(float));
-	//shuf = (int*)malloc(n * sizeof(int));
-	// because the client handle the batching into *ciphertext part, shuffle should be finished before that.
-	/**
-	x = (SEALCiphertext **)malloc(n * sizeof(float*));
-	y = (float**)malloc(n * sizeof(float*));
-	kann_shuffle(n, shuf);
-	for (j = 0; j < n; ++j)
-		x[j] = _x[shuf[j]], y[j] = _y[shuf[j]];
-		
-	**/
 	//instead of representing sample number, here n_train represents *ciphertext number. 
 	n_val = (int)(n * frac_val);
 	n_train = n - n_val;
 	//Without plain labels, maybe we don't need to evaluate.
-	if (!_truth)
-		n_val = 0;
+	// if (!_truth)
+	// 	n_val = 0;
 	min_x = (float*)malloc((n_var - n_encrypted_var) * sizeof(float));
 	min_x_c = (SEALCiphertext*)malloc(n_encrypted_var * sizeof(SEALCiphertext));
 	min_c = (float*)malloc(n_const * sizeof(float));
@@ -648,34 +642,86 @@ SEALCiphertext **_x, SEALCiphertext **_y, float ** _truth)
 		int n_proc = 0, n_train_err = 0, n_val_err = 0, n_train_base = 0, n_val_base = 0;
 		double train_cost = 0.0, val_cost = 0.0;
 		int total_train_num = 0, total_val_num = 0;
+		int ret_size;
 		kann_switch(ann, 1);
 		while (n_proc < n_train) {
-			int b, c;
-			kann_feed_bind(ann, KANN_F_IN,    0, &_x[n_proc]);
-			kann_feed_bind(ann, KANN_F_TRUTH, 0, &_y[n_proc]);
+			batch_dir =  base_dir + "/" + to_string(n_proc);
+			ret_size = load_batch_ciphertext(_x, data_size, batch_dir, 0);
+			if (ret_size != data_size) {
+				cout << "[train ] load data return " << ret_size << ". expect " << data_size << endl;
+				goto train_exit;
+			}
+			ret_size = load_batch_ciphertext(_y, label_size, batch_dir, 1);
+			if (ret_size != label_size) {
+				cout << "[train ] load label return " << ret_size << ". expect " << label_size << endl;
+				goto train_exit;
+			}
+			// SEALPlaintext result_p;
+			// vector<double> tmp_v(3);
+			// vector<vector<double>> result_v(3, vector<double>(data_size));
+			// for (j = 0; j < data_size; ++j) {
+			// 	engine->decrypt(_x[j], result_p);
+    		// 	engine->decode(result_p, tmp_v);
+			// 	for (k = 0; k < 3; ++k)
+			// 		result_v[k][j] = tmp_v[k];
+			// }
+			// for (k = 0; k < 3; ++k) {
+			// 	cout << "data: " << k << endl;
+			// 	print_vector(result_v[k]);
+			// 	result_v[k].resize(label_size);
+			// }
+			// for (j = 0; j < label_size; ++j) {
+			// 	engine->decrypt(_y[j], result_p);
+			// 	engine->decode(result_p, tmp_v);
+			// 	for (k = 0; k < 3; ++k)
+			// 		result_v[k][j] = tmp_v[k];
+			// }
+			// for (k = 0; k < 3; ++k) {
+			// 	cout << "label: " << k << endl;
+			// 	print_vector(result_v[k]);
+			// }    
+			// return 0;
+			x_ptr = _x.data(), y_ptr = _y.data();
+			kann_feed_bind(ann, KANN_F_IN,    0, &x_ptr);
+			kann_feed_bind(ann, KANN_F_TRUTH, 0, &y_ptr);
 			train_cost += kann_cost(ann, 0, 1);
-			total_train_num += _x[n_proc][0].size();
+			total_train_num += _x[0].size();
 			for (k = 0; k < ann->n; k++){
 				if (kad_is_var(ann->v[k])){
+					// if(seal_is_encrypted(ann->v[k]))
+					// 	kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g, ann->v[k]->x);
+					// else
+					// 	kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g_c, ann->v[k]->x_c);
 					if(seal_is_encrypted(ann->v[k]))
-						kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g, ann->v[k]->x);
-					else
 						kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g_c, ann->v[k]->x_c);
+					else
+						kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g, ann->v[k]->x);	
 				}
 			}
 			n_proc += 1;
 		}
 		train_cost /= total_train_num;
 		kann_switch(ann, 0);
-		n_proc = 0;
 		//TODO: fixed evaluation set. May cause some problems when used for real tasks.
-		while (n_proc < n_val) {
+		while (n_proc < n_train + n_proc) {
 			int b, c;
-			kann_feed_bind(ann, KANN_F_IN,    0, &_x[n_train + n_proc]);
-			kann_feed_bind(ann, KANN_F_TRUTH, 0, &_y[n_train + n_proc]);
+			batch_dir =  base_dir + "/" + to_string(n_proc);
+			ret_size = load_batch_ciphertext(_x, data_size, batch_dir, 0);
+			if (ret_size != data_size) {
+				cout << "[eval ] load data return " << ret_size << ". expect " << data_size << endl;
+				goto train_exit;
+			}
+			ret_size = load_batch_ciphertext(_y, label_size, batch_dir, 1);
+			if (ret_size != label_size) {
+				cout << "[eval ] load label return " << ret_size << ". expect " << label_size << endl;
+				goto train_exit;
+			}
+			x_ptr = _x.data(), y_ptr = _y.data();
+			kann_feed_bind(ann, KANN_F_IN,    0, &x_ptr);
+			kann_feed_bind(ann, KANN_F_TRUTH, 0, &y_ptr);
 			val_cost += kann_cost(ann, 0, 0);
-			total_val_num += _x[n_train + n_proc][0].size();
-			c = kann_class_error(ann, _truth[n_train + n_proc],  &b);
+			total_val_num += _x[0].size();
+			c = kann_class_error(ann, _truth[n_proc].data(), &b);
 			n_val_err += c, n_val_base += b;
 			n_proc += 1;
 		}
@@ -707,9 +753,11 @@ SEALCiphertext **_x, SEALCiphertext **_y, float ** _truth)
 		for (k = 0; k < n_encrypted_var; k ++)ann->x_c[k] = min_x_c[k];
 	}
 
+train_exit:
 	std::free(min_c); std::free(min_x); std::free(min_x_c); 
 	return i;
 }
+
 
 float kann_cost_fnn1(kann_t *ann, int n, SEALCiphertext **x, SEALCiphertext **y)
 {
@@ -737,52 +785,4 @@ SEALCiphertext *kann_apply1(kann_t *a, SEALCiphertext *x_c)
 	kann_feed_bind(a, KANN_F_IN, 0, &x_c);
 	kad_eval_at(a->n, a->v, i_out);
 	return a->v[i_out]->x_c;
-}
-
-
-
-template<typename T>
-static inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3)
-{
-    /*
-    Save the formatting information for std::cout.
-    */
-    std::ios old_fmt(nullptr);
-    old_fmt.copyfmt(std::cout);
-
-    size_t slot_count = vec.size();
-
-    std::cout << std::fixed << std::setprecision(prec);
-    std::cout << std::endl;
-    if(slot_count <= 2 * print_size)
-    {
-        std::cout << "    [";
-        for (size_t i = 0; i < slot_count; i++)
-        {
-            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
-        }
-    }
-    else
-    {
-        vec.resize(std::max(vec.size(), 2 * print_size));
-        std::cout << "    [";
-        for (size_t i = 0; i < print_size; i++)
-        {
-            std::cout << " " << vec[i] << ",";
-        }
-        if(vec.size() > 2 * print_size)
-        {
-            std::cout << " ...,";
-        }
-        for (size_t i = slot_count - print_size; i < slot_count; i++)
-        {
-            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
-        }
-    }
-    std::cout << std::endl;
-
-    /*
-    Restore the old std::cout formatting.
-    */
-    std::cout.copyfmt(old_fmt);
 }

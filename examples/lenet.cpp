@@ -230,6 +230,15 @@ int main(int argc, char *argv[])
     kann_feed_bind(cnn_ann, KANN_F_IN, 0, &bind_data);
     kann_feed_bind(cnn_ann, KANN_F_TRUTH, 0, &bind_label);
     train_cost = kann_cost(cnn_ann, 0, 1);
+    for (k = 0; k < cnn_ann->n; k++){
+        cout << "SGD " << k << endl;
+        if (kad_is_var(cnn_ann->v[k])){
+            if(seal_is_encrypted(cnn_ann->v[k]))
+                kann_SGD(kad_len(cnn_ann->v[k]), lr, 0, cnn_ann->v[k]->g_c, cnn_ann->v[k]->x_c);
+            else
+                kann_SGD(kad_len(cnn_ann->v[k]), lr, 0, cnn_ann->v[k]->g, cnn_ann->v[k]->x);    
+         }
+    }
     time_start = chrono::high_resolution_clock::now();
     train_cost = kann_cost(cnn_ann, 0, 1);
     time_end = chrono::high_resolution_clock::now();
