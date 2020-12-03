@@ -20,12 +20,12 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1,false);
+    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
-    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0,false);
+    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
-    lenet = kad_relu(kann_layer_dense(lenet, 120,false,true));
-    lenet = kad_relu(kann_layer_dense(lenet, 84,false,true));
+    lenet = kad_relu(kann_layer_dense(lenet, 120));
+    lenet = kad_relu(kann_layer_dense(lenet, 84));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
@@ -145,6 +145,7 @@ int main(int argc, char *argv[])
 
     if (optind + 1 < argc) { // read labels
         out = kann_data_read(argv[optind + 1]);
+        cout << "in row: " << in->n_row << "\tout row: " << out->n_row << endl;
         assert(in->n_row == out->n_row);
     }
     //for now only training 
