@@ -270,7 +270,7 @@ total_samples = 128;
 	time_end = chrono::high_resolution_clock::now();
 	i_cost = kann_find(ann, KANN_F_COST, 0);
 	training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-	print_model(ann, i_cost, 1);
+	print_model(ann, i_cost, 1, 1);
 
 	// 5. check the gradients
 	kad_check_grad(ann->n, ann->v, i_cost);
@@ -369,7 +369,7 @@ total_samples = 128;
 	time_end = chrono::high_resolution_clock::now();
 	i_cost = kann_find(cnn_ann, KANN_F_COST, 0);
 	cnn_training_step_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);
-	print_model(cnn_ann, i_cost, 1);
+	print_model(cnn_ann, i_cost, 1, 1);
 
 	//5.6 check cnn gradients
 	kad_check_grad(cnn_ann->n, cnn_ann->v, i_cost);

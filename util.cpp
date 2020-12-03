@@ -124,7 +124,7 @@ void print_ciphertext(SEALCiphertext *cipher){
 	print_vector(t[0]);
 }
 
-void print_model(kann_t * model, int from, bool grad){
+void print_model(kann_t * model, int from, bool data, bool grad){
 	int i,j;
 	assert(from < model->n);
 	cout << "total node num:" << model->n << endl;
@@ -142,45 +142,54 @@ void print_model(kann_t * model, int from, bool grad){
 			cout << "encrypted feed:" << endl;
 			cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->x_c[0].ciphertext().parms_id())->chain_index() << endl;
 			cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
-			for (j = 0; j < kad_len(model->v[i]); j++){
-				engine->decrypt(model->v[i]->x_c[j], *plaintext);
-				engine->decode(*plaintext, t[0]);
-				print_vector(t[0], 4, 10);
-			}
+			if (data)
+				for (j = 0; j < kad_len(model->v[i]); j++){
+					engine->decrypt(model->v[i]->x_c[j], *plaintext);
+					engine->decode(*plaintext, t[0]);
+					print_vector(t[0], 4, 10);
+				}
 		}
 		else if (kad_is_back(model->v[i])){
 			if(seal_is_encrypted(model->v[i])){
 				cout << "encrypted:" << endl;
 				cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->x_c[0].ciphertext().parms_id())->chain_index() << endl;
 				cout << "ciphertext size:" << model->v[i]->x_c[0].size() << endl;
-				for (j = 0; j < kad_len(model->v[i]); j++){
-					engine->decrypt(model->v[i]->x_c[j], *plaintext);
-					engine->decode(*plaintext, t[0]);
-					print_vector(t[0], 4, 10);
-				}
-				if(grad){
-					cout << "encrytped grad:" << endl;
+				if (data)
 					for (j = 0; j < kad_len(model->v[i]); j++){
-						if(model->v[i]->g_c[j].clean()){
-							cout << "clean grad" << endl;
-						}else{
-							engine->decrypt(model->v[i]->g_c[j], *plaintext);
-							engine->decode(*plaintext, t[0]);
-							print_vector(t[0], 4, 10);
-						}
+						engine->decrypt(model->v[i]->x_c[j], *plaintext);
+						engine->decode(*plaintext, t[0]);
+						print_vector(t[0], 4, 10);
 					}
-	
+				if(grad  && !(model->v[i]->ext_flag & KANN_F_COST)){
+					cout << "encrytped grad:" << endl;
+					int first_non_clean = -1;
+					if(data)
+						for (j = 0; j < kad_len(model->v[i]); j++){
+							if(model->v[i]->g_c[j].clean()){
+								cout << "clean grad" << endl;
+							}else{
+								first_non_clean = j;
+								engine->decrypt(model->v[i]->g_c[j], *plaintext);
+								engine->decode(*plaintext, t[0]);
+								print_vector(t[0], 4, 10);
+							}
+						}
+					if(first_non_clean >=0 )
+						cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->g_c[first_non_clean].ciphertext().parms_id())->chain_index() << endl;
+		
 				}
 			}else{
 				cout << "plain var:" << endl;
-				for (j = 0; j < kad_len(model->v[i]); j++){
-					cout << model->v[i]->x[j] << endl;
-				}
+				if(data)
+					for (j = 0; j < kad_len(model->v[i]); j++){
+						cout << model->v[i]->x[j] << endl;
+					}
 				if (grad){
 					cout << "plain grad:" << endl;
-					for (j = 0; j < kad_len(model->v[i]); j++){
-						cout << model->v[i]->g[j] << endl;
-					}
+					if(data)
+						for (j = 0; j < kad_len(model->v[i]); j++){
+							cout << model->v[i]->g[j] << endl;
+						}
 				}
 			}
 		}

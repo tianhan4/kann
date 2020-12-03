@@ -86,8 +86,8 @@ int main(int argc, char *argv[])
     // the encryption environment
     cout << "set up the encryption engine" << endl;
     size_t poly_modulus_degree = 8192;
-    size_t standard_scale = 40;
-    std::vector<int> coeff_modulus = {60, 40, 40, 60};
+    size_t standard_scale = 30;
+    std::vector<int> coeff_modulus = {40, 30, 30, 30, 30, 40};
     SEALEncryptionParameters parms(poly_modulus_degree,
                     coeff_modulus,
                     seal_scheme::CKKS);
@@ -230,6 +230,8 @@ int main(int argc, char *argv[])
     kann_feed_bind(cnn_ann, KANN_F_IN, 0, &bind_data);
     kann_feed_bind(cnn_ann, KANN_F_TRUTH, 0, &bind_label);
     train_cost = kann_cost(cnn_ann, 0, 1);
+
+    print_model(cnn_ann, cnn_ann->n - 1, false, true);
     for (k = 0; k < cnn_ann->n; k++){
         cout << "SGD " << k << endl;
         if (kad_is_var(cnn_ann->v[k])){
@@ -239,6 +241,8 @@ int main(int argc, char *argv[])
                 kann_SGD(kad_len(cnn_ann->v[k]), lr, 0, cnn_ann->v[k]->g, cnn_ann->v[k]->x);    
          }
     }
+    cout <<"after update" <<endl;
+    print_model(cnn_ann, cnn_ann->n - 1, false, true);
     time_start = chrono::high_resolution_clock::now();
     train_cost = kann_cost(cnn_ann, 0, 1);
     time_end = chrono::high_resolution_clock::now();

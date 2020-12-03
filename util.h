@@ -15,7 +15,7 @@ inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3
 
 void print_ciphertext(SEALCiphertext *cipher);
 
-void print_model(kann_t * model, int from, bool grad);
+void print_model(kann_t * model, int from, bool data, bool grad);
 
 // is_label: 0 load data, 1 load label
 int load_batch_ciphertext(vector<SEALCiphertext>& ciphertext_vec, int size, string dir, int is_label);
