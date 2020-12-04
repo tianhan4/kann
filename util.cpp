@@ -163,17 +163,19 @@ void print_model(kann_t * model, int from, bool data, bool grad){
 				if(grad  && !(model->v[i]->ext_flag & KANN_F_COST)){
 					cout << "encrytped grad:" << endl;
 					int first_non_clean = -1;
-					if(data)
-						for (j = 0; j < kad_len(model->v[i]); j++){
-							if(model->v[i]->g_c[j].clean()){
+					for (j = 0; j < kad_len(model->v[i]); j++){
+						if(model->v[i]->g_c[j].clean()){
+							if(data)
 								cout << "clean grad" << endl;
-							}else{
-								first_non_clean = j;
+						}else{
+							first_non_clean = j;
+							if(data){
 								engine->decrypt(model->v[i]->g_c[j], *plaintext);
 								engine->decode(*plaintext, t[0]);
 								print_vector(t[0], 4, 10);
 							}
 						}
+					}
 					if(first_non_clean >=0 )
 						cout << " level: " << engine->get_context()->get_sealcontext()->get_context_data(model->v[i]->g_c[first_non_clean].ciphertext().parms_id())->chain_index() << endl;
 		

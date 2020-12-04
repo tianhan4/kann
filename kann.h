@@ -122,7 +122,7 @@ int kann_feed_bind(kann_t *a, uint32_t ext_flag, int32_t ext_label, SEALCipherte
  *
  * @return cost
  */
-float kann_cost(kann_t *a, int cost_label, int cal_grad);
+float kann_cost(kann_t *a, int cost_label, int cal_grad, double lr = 1.0);
 
 int kann_eval(kann_t *a, uint32_t ext_flag, int ext_label);
 int kann_eval_out(kann_t *a);

@@ -20,17 +20,17 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
+    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1, false);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
-    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
+    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0, false);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
-    lenet = kad_relu(kann_layer_dense(lenet, 120));
-    lenet = kad_relu(kann_layer_dense(lenet, 84));
+    lenet = kad_relu(kann_layer_dense(lenet, 120, false, true));
+    lenet = kad_relu(kann_layer_dense(lenet, 84, false, true));
 
     if (n_labels == 1)
-        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
+        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB, false, true), 0);
     else
-        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEM), 0);
+        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEM, false, true), 0);
 }
 
 int main(int argc, char *argv[])
@@ -86,8 +86,8 @@ int main(int argc, char *argv[])
     // the encryption environment
     cout << "set up the encryption engine" << endl;
     size_t poly_modulus_degree = 8192;
-    size_t standard_scale = 30;
-    std::vector<int> coeff_modulus = {40, 30, 30, 30, 30, 40};
+    size_t standard_scale = 35;
+    std::vector<int> coeff_modulus = {45, 35, 35, 35, 50};
     SEALEncryptionParameters parms(poly_modulus_degree,
                     coeff_modulus,
                     seal_scheme::CKKS);
@@ -230,20 +230,22 @@ int main(int argc, char *argv[])
     SEALCiphertext * bind_label = image_labels_c[0].data();  
     kann_feed_bind(cnn_ann, KANN_F_IN, 0, &bind_data);
     kann_feed_bind(cnn_ann, KANN_F_TRUTH, 0, &bind_label);
-    train_cost = kann_cost(cnn_ann, 0, 1);
+    //train_cost = kann_cost(cnn_ann, 0, 0);
 
-    print_model(cnn_ann, cnn_ann->n - 1, false, true);
+    //print_model(cnn_ann, cnn_ann->n - 1, false, false);
+    train_cost = kann_cost(cnn_ann, 0, 1, lr);
+    //print_model(cnn_ann, cnn_ann->n - 1, false, true);
     for (k = 0; k < cnn_ann->n; k++){
         cout << "SGD " << k << endl;
         if (kad_is_var(cnn_ann->v[k])){
             if(seal_is_encrypted(cnn_ann->v[k]))
-                kann_SGD(kad_len(cnn_ann->v[k]), lr, 0, cnn_ann->v[k]->g_c, cnn_ann->v[k]->x_c);
+                kann_SGD(kad_len(cnn_ann->v[k]), -1, 0, cnn_ann->v[k]->g_c, cnn_ann->v[k]->x_c);
             else
-                kann_SGD(kad_len(cnn_ann->v[k]), lr, 0, cnn_ann->v[k]->g, cnn_ann->v[k]->x);    
+                kann_SGD(kad_len(cnn_ann->v[k]), -1, 0, cnn_ann->v[k]->g, cnn_ann->v[k]->x);    
          }
     }
-    cout <<"after update" <<endl;
-    print_model(cnn_ann, cnn_ann->n - 1, false, true);
+    //cout <<"after update" <<endl;
+    //print_model(cnn_ann, cnn_ann->n - 1, false, true);
     time_start = chrono::high_resolution_clock::now();
     train_cost = kann_cost(cnn_ann, 0, 1);
     time_end = chrono::high_resolution_clock::now();

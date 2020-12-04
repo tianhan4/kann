@@ -170,7 +170,7 @@ void kad_eval_marked(int n, kad_node_t **a);
  * @param a       list of nodes
  * @param from    the function node; must be a scalar (compute \nabla a[from])
  */
-void kad_grad(int n, kad_node_t **a, int from, bool add_noise);
+void kad_grad(int n, kad_node_t **a, int from, bool add_noise, double learning_rate = 1.0);
 
 /**
  * Unroll a recurrent computation graph

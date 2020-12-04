@@ -6,6 +6,7 @@
 #include <cstdarg>
 #include <iostream>
 #include <iomanip>
+#include <omp.h>
 #include "kann.h"
 #include "util.h"
 
@@ -215,7 +216,7 @@ int kann_feed_dim(const kann_t *a, uint32_t ext_flag, int32_t ext_label)
 	return k == 1? n : k == 0? -1 : -2;
 }
 
-static float kann_cost_core(kann_t *a, int cost_label, int cal_grad)
+static float kann_cost_core(kann_t *a, int cost_label, int cal_grad, double lr)
 {
 	int i_cost;
 	SEALCiphertext cost_c(engine);
@@ -223,7 +224,7 @@ static float kann_cost_core(kann_t *a, int cost_label, int cal_grad)
 	i_cost = kann_find(a, KANN_F_COST, cost_label);
 	assert(i_cost >= 0);
 	cost_c = *kad_eval_at(a->n, a->v, i_cost);
-	if (cal_grad) kad_grad(a->n, a->v, i_cost, engine->noise_mode());
+	if (cal_grad) kad_grad(a->n, a->v, i_cost, engine->noise_mode(), lr);
 	hewrapper::sum_vector(cost_c);
 	if (remote){
 		assert(false);
@@ -287,7 +288,7 @@ static int kann_class_error_core(const kann_t *ann, float *truth, int *base)
 
 
 void kann_mt(kann_t *ann, int n_threads, int max_batch_size) {}
-float kann_cost(kann_t *a, int cost_label, int cal_grad) { return kann_cost_core(a, cost_label, cal_grad); }
+float kann_cost(kann_t *a, int cost_label, int cal_grad, double lr) { return kann_cost_core(a, cost_label, cal_grad, lr); }
 int kann_eval_out(kann_t *a) { return kann_eval(a, KANN_F_OUT, 0); }
 int kann_class_error(const kann_t *a, float *truth, int *base) { return kann_class_error_core(a, truth, base); }
 void kann_switch(kann_t *ann, int is_train) { return kann_switch_core(ann, is_train); }
@@ -383,6 +384,12 @@ kad_node_t *kann_new_leaf_array(int *offset, kad_node_p *par, uint8_t flag, floa
 				p->x_c[i].init(engine);
 				engine->encode((float)(kad_drand_normal(0) * sdev_inv), *plaintext);
 				engine->encrypt(*plaintext, p->x_c[i]);
+				// change to mod 1.
+				std::shared_ptr<seal::SEALContext> context = engine->get_context()->get_sealcontext();
+				auto data_level_1 = context->last_context_data()->prev_context_data();
+				//cout << "data level:" << data_level_1->chain_index() << endl;
+				engine->get_evaluator()->mod_switch_to_inplace(p->x_c[i].ciphertext(), data_level_1->parms_id());
+				
 			}
 			/**
 			for (i = 0; i < len; ++i){
@@ -398,6 +405,10 @@ kad_node_t *kann_new_leaf_array(int *offset, kad_node_p *par, uint8_t flag, floa
 				p->x_c[i].init(engine);
 				engine->encode((float)(kad_drand_normal(0) * sdev_inv), *plaintext);
 				engine->encrypt(*plaintext, p->x_c[i]);
+				std::shared_ptr<seal::SEALContext> context = engine->get_context()->get_sealcontext();
+				auto data_level_1 = context->last_context_data()->prev_context_data();
+				//cout << "data level:" << data_level_1->chain_index() << endl;
+				engine->get_evaluator()->mod_switch_to_inplace(p->x_c[i].ciphertext(), data_level_1->parms_id());
 			}
 		}
 	}else{
@@ -562,11 +573,21 @@ void kann_SGD(int n, float h0, const float *h, const float *g, SEALCiphertext *t
 
 void kann_SGD(int n, float h0, const float *h, SEALCiphertext *g, SEALCiphertext *t){
 	int i;
+#pragma omp parallel
+{
+#pragma omp for
 	for (i = 0; i < n; ++i) {
+		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
 		float lr = h? h[i] : h0;
-		seal_multiply(g[i], -lr, *ciphertext);
-		seal_add_inplace(t[i], *ciphertext);
+		if(lr != -1){
+			seal_multiply(g[i], -lr, ciphertext[thread_mod_id]);
+			seal_add_inplace(t[i], ciphertext[thread_mod_id]);
+		}else{
+			seal_add_inplace(t[i], g[i]);
+		}
 	}
+}
+
 }
 
 /***

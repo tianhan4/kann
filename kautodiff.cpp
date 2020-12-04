@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iostream>
 #include <omp.h>
+#include "util.h"
 
 #ifndef _DEBUG // works in VS
 #define DEBUG(x) 
@@ -626,7 +627,7 @@ const SEALCiphertext *kad_eval_at(int n, kad_node_t **a, int from)
 }
 
 // BP from the 'from' node, where the initial gradient resides.
-void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
+void kad_grad(int n, kad_node_t **a, int from, bool add_noise, double learning_rate)
 {
 	int i, j;
 	if (from < 0 || from >= n) from = n - 1;
@@ -647,8 +648,10 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 			kad_op_list[a[i]->op](a[i], KAD_BACKWARD);
         }
 	}
+
 	//sum encrypted gradients
 	for (i = 0; i <= from; ++i){
+		//cout << "sum node:" << i << endl;
 		if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
 			if (!(seal_is_encrypted(a[i]))){
 				if(remote){
@@ -667,7 +670,7 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise)
 							engine->decrypt(a[i]->g_c[j], plaintext[thread_mod_id]);
 							engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
 							//here is where noise should be added.
-							a[i]->g[j] = std::accumulate(t[thread_mod_id].begin(), t[thread_mod_id].end(), 0);		
+							a[i]->g[j] = learning_rate * std::accumulate(t[thread_mod_id].begin(), t[thread_mod_id].end(), 0);		
 						}
 					}
 }
@@ -684,7 +687,7 @@ int len_num = kad_len(a[i]);
 						continue;
 					}else{
 						// maybe faster on the client side to decrypt+sum+encrypte?
-						hewrapper::sum_vector(a[i]->g_c[j]);
+						hewrapper::sum_vector(a[i]->g_c[j], learning_rate);
 					}
 
 				}
@@ -896,14 +899,22 @@ static inline float kad_sdot(int n, const float *x, const float *y) /* BLAS sdot
 static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, SEALCiphertext *x, SEALCiphertext *y, bool is_parameter = false){
     int i;
 	if(n == 0)return;
+	{
+		int thread_mod_id = 0;
+		ciphertext[0] = x[0];
+		if(is_parameter)seal_multiply_inplace(ciphertext[0], a, true);
+		else seal_multiply_inplace(ciphertext[0], a);
+		seal_add_inplace(y[0], ciphertext[0]);
+	}
+
 	#pragma omp parallel
 	{
 	#pragma omp for
-		for (i = 0; i < n; ++i){
+		for (i = 1; i < n; ++i){
 			int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-			ciphertext[thread_mod_id] = a;
-			if(is_parameter)seal_multiply_inplace(ciphertext[thread_mod_id], x[i], true);
-			else seal_multiply_inplace(ciphertext[thread_mod_id], x[i]);
+			ciphertext[thread_mod_id] = x[i];
+			if(is_parameter)seal_multiply_inplace(ciphertext[thread_mod_id], a, true);
+			else seal_multiply_inplace(ciphertext[thread_mod_id], a);
 			seal_add_inplace(y[i], ciphertext[thread_mod_id]);
 		}
 	}
