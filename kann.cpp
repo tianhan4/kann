@@ -256,7 +256,6 @@ static int kann_class_error_core(const kann_t *ann, float *truth, int *base)
 		kad_node_t *p = ann->v[i];
 		if (((p->op == 13 && (p->n_child == 2 || p->n_child == 3)) || (p->op == 22 && p->n_child == 2)) && p->n_d == 0) { /* ce_bin or ce_multi */
 			kad_node_t *x = p->child[0];
-			assert(x->n_d == 1);
 			n = x->d[x->n_d - 1];
 			
 			for (k = 0; k < n; ++k) {
@@ -279,6 +278,9 @@ static int kann_class_error_core(const kann_t *ann, float *truth, int *base)
 				if (t_sum - 1.0f == 0 && t_min >= 0.0f && x_min >= 0.0f && x_max <= 1.0f) {
 					++(*base);
 					n_err += (x_max_k != t_max_k);
+					cout << "predited class:" << x_max_k << "truth class:" << t_max_k << "error:" << (x_max_k != t_max_k);
+				}else{
+					throw invalid_argument("Invalid sample.");
 				}
 			}
 		}
@@ -630,7 +632,7 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 	float min_val_cost = FLT_MAX, *min_x, *min_c;
 	string batch_dir;
 
-	vector<SEALCiphertext> _x(data_size);
+	vector<SEALCiphertext> _x(data_size); 
     vector<SEALCiphertext> _y(label_size);
 	SEALCiphertext *x_ptr, *y_ptr;
 	SEALCiphertext *min_x_c;

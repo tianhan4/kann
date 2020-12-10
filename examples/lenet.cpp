@@ -20,12 +20,12 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
+    lenet = kann_layer_conv2d(lenet, 2, 5, 5, 1, 1, 1, 1);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
-    lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
+    lenet = kann_layer_conv2d(lenet, 2, 5, 5, 1, 1, 0, 0);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
-    lenet = kad_relu(kann_layer_dense(lenet, 120));
-    lenet = kad_relu(kann_layer_dense(lenet, 84));
+    lenet = kad_relu(kann_layer_dense(lenet, 2));
+    lenet = kad_relu(kann_layer_dense(lenet, 2));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
@@ -251,7 +251,7 @@ int main(int argc, char *argv[])
     cout << "CNN Training step time:" << training_step_time.count() << "microseconds" << endl;
 
     cout << "eval class error" << endl;
-    int b;
+    int b = 0;
     vector<float> truth(mini_size * used_label->n_col, 0);
     c = kann_class_error(cnn_ann, truth.data(), &b);
     cout << "error num: " << c << endl;
