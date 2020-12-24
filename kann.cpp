@@ -201,7 +201,7 @@ int kann_feed_bind(kann_t *a, uint32_t ext_flag, int32_t ext_label, SEALCipherte
 	if (x_c == 0) return 0;
 	for (i = k = 0; i < a->n; ++i)
 		if (kad_is_feed(a->v[i]) && chk_flg(a->v[i]->ext_flag, ext_flag) && chk_lbl(a->v[i]->ext_label, ext_label)){
-			cout << "binding input into node:" << i << endl;
+			// cout << "binding input into node:" << i << endl;
 			a->v[i]->x_c = x_c[k++];
 		}
 	return k;
@@ -278,7 +278,7 @@ static int kann_class_error_core(const kann_t *ann, float *truth, int *base)
 				if (t_sum - 1.0f == 0 && t_min >= 0.0f && x_min >= 0.0f && x_max <= 1.0f) {
 					++(*base);
 					n_err += (x_max_k != t_max_k);
-					cout << "predited class:" << x_max_k << "truth class:" << t_max_k << "error:" << (x_max_k != t_max_k);
+					// cout << "predited class:" << x_max_k << "truth class:" << t_max_k << "error:" << (x_max_k != t_max_k);
 				}else{
 					throw invalid_argument("Invalid sample.");
 				}
@@ -645,7 +645,8 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 	n_const = kann_size_const(ann);
 
 	//instead of representing sample number, here n_train represents *ciphertext number. 
-	n_val = (int)(n * frac_val);
+	// n_val = (int)(n * frac_val);
+	n_val = 0;
 	n_train = n - n_val;
 	//Without plain labels, maybe we don't need to evaluate.
 	// if (!_truth)
@@ -654,18 +655,13 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 	min_x_c = (SEALCiphertext*)malloc(n_encrypted_var * sizeof(SEALCiphertext));
 	min_c = (float*)malloc(n_const * sizeof(float));
 
-	// Instead of copying training data into "feed space", I decide to change the poiter of the feed directly across the original data array.
-	// Because I think for a batched, encrypted dataset, every preprocessing step should have been performed well.
-	//x1 = (SEALCiphertext*)malloc(n_in   * sizeof(SEALCiphertext));
-	//y1 = (SEALCiphertext*)malloc(n_out  * sizeof(SEALCiphertext));
-	//kann_feed_bind(ann, KANN_F_IN,    0, &x1);
-	//kann_feed_bind(ann, KANN_F_TRUTH, 0, &y1);
 
 	for (i = 0; i < max_epoch; ++i) {
 		int n_proc = 0, n_train_err = 0, n_val_err = 0, n_train_base = 0, n_val_base = 0;
 		double train_cost = 0.0, val_cost = 0.0;
 		int total_train_num = 0, total_val_num = 0;
 		int ret_size;
+		int b, c;
 		kann_switch(ann, 1);
 		while (n_proc < n_train) {
 			batch_dir =  base_dir + "/" + to_string(n_proc);
@@ -679,31 +675,6 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 				cout << "[train ] load label return " << ret_size << ". expect " << label_size << endl;
 				goto train_exit;
 			}
-			// SEALPlaintext result_p;
-			// vector<double> tmp_v(3);
-			// vector<vector<double>> result_v(3, vector<double>(data_size));
-			// for (j = 0; j < data_size; ++j) {
-			// 	engine->decrypt(_x[j], result_p);
-    		// 	engine->decode(result_p, tmp_v);
-			// 	for (k = 0; k < 3; ++k)
-			// 		result_v[k][j] = tmp_v[k];
-			// }
-			// for (k = 0; k < 3; ++k) {
-			// 	cout << "data: " << k << endl;
-			// 	print_vector(result_v[k]);
-			// 	result_v[k].resize(label_size);
-			// }
-			// for (j = 0; j < label_size; ++j) {
-			// 	engine->decrypt(_y[j], result_p);
-			// 	engine->decode(result_p, tmp_v);
-			// 	for (k = 0; k < 3; ++k)
-			// 		result_v[k][j] = tmp_v[k];
-			// }
-			// for (k = 0; k < 3; ++k) {
-			// 	cout << "label: " << k << endl;
-			// 	print_vector(result_v[k]);
-			// }    
-			// return 0;
 			x_ptr = _x.data(), y_ptr = _y.data();
 			kann_feed_bind(ann, KANN_F_IN,    0, &x_ptr);
 			kann_feed_bind(ann, KANN_F_TRUTH, 0, &y_ptr);
@@ -711,23 +682,23 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 			total_train_num += _x[0].size();
 			for (k = 0; k < ann->n; k++){
 				if (kad_is_var(ann->v[k])){
-					// if(seal_is_encrypted(ann->v[k]))
-					// 	kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g, ann->v[k]->x);
-					// else
-					// 	kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g_c, ann->v[k]->x_c);
 					if(seal_is_encrypted(ann->v[k]))
 						kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g_c, ann->v[k]->x_c);
 					else
 						kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g, ann->v[k]->x);	
 				}
 			}
+			if (n_proc % 10 == 0) {
+				cout << "epoch: "<< i+1 << " batch: "<<n_proc<<"; training cost: " << train_cost / total_train_num;
+				c = kann_class_error(ann, _truth[n_proc].data(), &b);
+				cout << " (class error: " <<  100.0f * c / b << "%)" << endl;
+			}
 			n_proc += 1;
 		}
 		train_cost /= total_train_num;
 		kann_switch(ann, 0);
 		//TODO: fixed evaluation set. May cause some problems when used for real tasks.
-		while (n_proc < n_train + n_proc) {
-			int b, c;
+		while (n_proc < n_train + n_val) {
 			batch_dir =  base_dir + "/" + to_string(n_proc);
 			ret_size = load_batch_ciphertext(_x, data_size, batch_dir, 0);
 			if (ret_size != data_size) {
@@ -754,7 +725,7 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 			// if (n_train_base) std::fprintf(stderr, " (class error: %.2f%%)", 100.0f * n_train_err / n_train);
 			if (n_val > 0) {
 				std::fprintf(stderr, "; validation cost: %g", val_cost);
-				if (n_val_base) std::fprintf(stderr, " (class error: %.2f%%)", 100.0f * n_val_err / n_val);
+				if (n_val_base) std::fprintf(stderr, " (class error: %.2f%%)", 100.0f * n_val_err / n_val_base);
 			}
 			fputc('\n', stderr);
 		}
@@ -777,7 +748,11 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 	}
 
 train_exit:
-	std::free(min_c); std::free(min_x); std::free(min_x_c); 
+	try{
+		std::free(min_c); std::free(min_x); std::free(min_x_c); 
+	}catch(exception e){
+		cout<<e.what()<<endl;
+	}
 	return i;
 }
 

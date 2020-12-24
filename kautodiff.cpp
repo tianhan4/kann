@@ -606,7 +606,7 @@ void kad_eval_marked(int n, kad_node_t **a)
 	kad_propagate_marks(n, a);
 	for (i = 0; i < n; ++i)
 		if (a[i]->n_child && a[i]->tmp > 0){
-			cout << "forwarding node :" << i << " op " << kad_op_name[a[i]->op] << endl;
+			// cout << "forwarding node :" << i << " op " << kad_op_name[a[i]->op] << endl;
 			kad_op_list[a[i]->op](a[i], KAD_FORWARD);
 			//kad_op_cmul(a[i], KAD_FORWARD, a);
 		}
@@ -644,7 +644,7 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise, double learning_r
     }
 	for (i = from, a[i]->g[0] = 1; i >= 0; --i){ /* backprop */
 		if (a[i]->n_child && a[i]->tmp > 0){
-			cout << "back propagating :" << i << " op " << kad_op_name[a[i]->op] << endl;
+			// cout << "back propagating :" << i << " op " << kad_op_name[a[i]->op] << endl;
 			kad_op_list[a[i]->op](a[i], KAD_BACKWARD);
         }
 	}
