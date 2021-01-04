@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdarg>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <omp.h>
 #include "kann.h"
@@ -23,7 +24,50 @@ extern vector<double> *truth_t;
  *** @@BASIC: fundamental KANN routines ***
  ******************************************/
 
-//rerange the leaves' arrays into three arrays: const, gradient, x.
+
+//providing uniform memory for a model's leaves.
+static void kad_ext_sync(int n, kad_node_t **a, float *c, float *x, SEALCiphertext *x_c, float *g, SEALCiphertext * g_c)
+{
+	int i, j, k, j_c, k_c, j_g, l, m;
+	for (i = j = k = j_c = k_c = j_g = 0; i < n; ++i) {
+		kad_node_t *v = a[i];
+		if (kad_is_var(v)) {
+			l = kad_len(v);
+			cout << "allocate var node:" << i << "len" << l << "encrypted" << seal_is_encrypted(v) <<endl;
+			if(seal_is_encrypted(v)){
+				if(v->x_c){
+					for (m = 0; m < l; m ++){
+						x_c[j_c+m] = v->x_c[m];
+					}
+					delete[] v->x_c;
+				}
+				v->x_c = &x_c[j_c];
+				j_c += l;
+			}else{
+				if(v->x){
+					std::memcpy(&x[j], v->x, l * sizeof(float));
+					delete[] v->x;
+				}
+				v->x = &x[j];
+				j += l;
+			}
+			v->g = &g[j_g];
+			v->g_c = &g_c[j_g];
+			j_g += l;
+		} else if (kad_is_const(v)) {
+			l = kad_len(v);
+			if(v->x){
+				std::memcpy(&c[k], v->x, l * sizeof(float));
+				delete[] v->x;
+			}
+			v->x = &c[k];
+			k += l;
+		}
+	}
+}
+
+
+//rerange the leaves' arrays into three arrays: const, gradient, x, g_c, x_c
 //work together with kann_new_leaf_array
 static void kad_ext_collate(int n, kad_node_t **a, float **_x, float **_g, float **_c, SEALCiphertext ** _x_c, 
 SEALCiphertext ** _g_c)
@@ -57,62 +101,9 @@ SEALCiphertext ** _g_c)
 		g_c[i].clean() = true;
 	}
 
-	for (i = j = k = j_c = k_c = j_g = 0; i < n; ++i) {
-		kad_node_t *v = a[i];
-		if (kad_is_var(v)) {
-			l = kad_len(v);
-			cout << "allocate var node:" << i << "len" << l << "encrypted" << seal_is_encrypted(v) <<endl;
-			if(seal_is_encrypted(v)){
-				for (m = 0; m < l; m ++){
-					x_c[j_c+m] = v->x_c[m];
-				}
-				delete[] v->x_c;
-				v->x_c = &x_c[j_c];
-				j_c += l;
-			}else{
-				std::memcpy(&x[j], v->x, l * sizeof(float));
-				delete[] v->x;
-				v->x = &x[j];
-				j += l;
-			}
-			v->g = &g[j_g];
-			v->g_c = &g_c[j_g];
-			j_g += l;
-		} else if (kad_is_const(v)) {
-			l = kad_len(v);
-			std::memcpy(&c[k], v->x, l * sizeof(float));
-			delete[] v->x;
-			v->x = &c[k];
-			k += l;
-		}
-	}
+	kad_ext_sync(n, a, c, x, x_c, g, g_c);
 }
 
-//providing uniform memory for a model's leaves.
-static void kad_ext_sync(int n, kad_node_t **a, float *x, float *g, float *c, SEALCiphertext *x_c, 
-SEALCiphertext * g_c)
-{
-	int i, j, j_c, j_g, k, l;
-	for (i = j = k = 0; i < n; ++i) {
-		kad_node_t *v = a[i];
-		if (kad_is_var(v)) {
-			l = kad_len(v);
-			if(seal_is_encrypted(v)){
-				v->x_c = &x_c[j_c];
-				j_c += l;
-			}else{
-				v->x = &x[j];
-				j += l;
-			}
-			v->g = &g[j_g];
-			v->g_c = &g_c[j_g];
-			j_g += l;
-		} else if (kad_is_const(v)) {
-			v->x = &c[k];
-			k += kad_len(v);
-		}
-	}
-}
 
 
 // From the cost node, including all roots altogether, build the model.
@@ -301,59 +292,92 @@ void kann_switch(kann_t *ann, int is_train) { return kann_switch_core(ann, is_tr
 
 #define KANN_MAGIC "KAN\1"
 
-//not implemented for now.
-/**
-void kann_save_fp(FILE *fp, kann_t *ann)
+void kann_save_fp(ostream & fs, kann_t *ann)
 {
-	kann_set_batch_size(ann, 1);
-	fwrite(KANN_MAGIC, 1, 4, fp);
-	kad_save(fp, ann->n, ann->v);
-	fwrite(ann->x, sizeof(float), kann_size_var(ann), fp);
-	fwrite(ann->c, sizeof(float), kann_size_const(ann), fp);
+	fs.write(KANN_MAGIC, 4);
+	kad_save(fs, ann->n, ann->v);
+	engine->save(fs, true, true);
+
+	int n_var = kad_size_var(ann->n, ann->v);
+	int n_encrypted_var = kad_size_encrypted_var(ann->n, ann->v);
+	int n_unencrypted_var = n_var - n_encrypted_var;
+	int n_const = kad_size_const(ann->n, ann->v);
+	fs.write((char *) ann->x, sizeof(float) * n_unencrypted_var);
+	fs.write((char *) ann->c, sizeof(float) * n_const);
+	for(int i = 0; i < n_encrypted_var; i++){
+		ann->x_c[i].save(fs);
+	}
 }
 
-void kann_save(const char *fn, kann_t *ann)
-{
-	FILE *fp;
-	fp = fn && strcmp(fn, "-")? fopen(fn, "wb") : stdout;
-	kann_save_fp(fp, ann);
-	fclose(fp);
+void kann_save(const char *fn, kann_t *ann){
+	fstream fs(fn, std::ios::binary | std::ios::out);
+	kann_save_fp(fs, ann);
 }
 
-kann_t *kann_load_fp(FILE *fp)
+kann_t *kann_load_fp(istream & fs)
 {
 	char magic[4];
 	kann_t *ann;
-	int n_var, n_const;
+	int i;
 
-	fread(magic, 1, 4, fp);
+	fs.read(magic, 4);
 	if (strncmp(magic, KANN_MAGIC, 4) != 0) {
-		fclose(fp);
 		return 0;
 	}
 	ann = (kann_t*)calloc(1, sizeof(kann_t));
-	ann->v = kad_load(fp, &ann->n);
-	n_var = kad_size_var(ann->n, ann->v);
-	n_const = kad_size_const(ann->n, ann->v);
-	ann->x = (float*)malloc(n_var * sizeof(float));
-	ann->g = (float*)calloc(n_var, sizeof(float));
-	ann->c = (float*)malloc(n_const * sizeof(float));
-	fread(ann->x, sizeof(float), n_var, fp);
-	fread(ann->c, sizeof(float), n_const, fp);
-	kad_ext_sync(ann->n, ann->v, ann->x, ann->g, ann->c);
+	ann->v = kad_load(fs, &ann->n);
+	engine->load(fs);
+	
+	int n_var = kad_size_var(ann->n, ann->v);
+	int n_encrypted_var = kad_size_encrypted_var(ann->n, ann->v);
+	int n_unencrypted_var = n_var - n_encrypted_var;
+	int n_const = kad_size_const(ann->n, ann->v);
+	if(ann->x) delete[] ann->x;
+	ann->x = new float[n_unencrypted_var];
+	//we assume all const values are plain.
+	if(ann->c) delete[] ann->c;
+	ann->c = new float[n_const];
+	if(ann->x_c) delete[] ann->x_c;
+	ann->x_c = new SEALCiphertext[n_encrypted_var];
+	if(ann->g) delete[] ann->g;
+	ann->g = new float[n_var];
+	if(ann->g_c) delete[] ann->g_c;
+	ann->g_c = new SEALCiphertext[n_var];
+
+	memset(ann->g, 0, n_var * sizeof(float));
+	for(i = 0; i < n_var; i++) {
+		ann->g_c[i].init(engine);
+		ann->g_c[i].clean() = true;
+	}
+
+	fs.read((char *)ann->x, sizeof(float) * n_unencrypted_var);
+	fs.read((char *)ann->c, sizeof(float) * n_const);
+	for(int i = 0; i < n_encrypted_var; i++){
+		ann->x_c[i].load(fs, engine);
+		ann->x_c[i].init(engine);
+	}
+
+	cout << "Allocate extenal memory for model." << endl;
+	kad_ext_sync(ann->n, ann->v, ann->c, ann->x, ann->x_c, ann->g, ann->g_c);
+
+	int req_alloc = 0;
+	for (i = 0; i < ann->n; ++i)
+		if (ann->v[i]->n_child > 0 && ann->v[i]->x == 0 && ann->v[i]->x_c == 0) req_alloc = 1;
+	if (req_alloc) {	
+		cout << "Allocate internal memory for model." << endl;
+		kad_allocate_internal(ann->n, ann->v);
+	}
+
 	return ann;
 }
 
 kann_t *kann_load(const char *fn)
 {
-	FILE *fp;
+	std::fstream fs(fn, std::ios::binary | std::ios::in);
 	kann_t *ann;
-	fp = fn && strcmp(fn, "-")? fopen(fn, "rb") : stdin;
-	ann = kann_load_fp(fp);
-	fclose(fp);
+	ann = kann_load_fp(fs);
 	return ann;
 }
-**/
 
 /**********************************************
  *** @@LAYER: layers and model generation ***

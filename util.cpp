@@ -37,7 +37,7 @@ int load_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename){
 	return 1;
 }
 
-// Save all things in the ciphertext, as well as the engine
+// Save all things in the ciphertext
 void save_ciphertext(SEALCiphertext* ciphertext, size_t cipher_num, string filename)
 {
 	ofstream ct;
@@ -51,7 +51,7 @@ void save_ciphertext(SEALCiphertext* ciphertext, size_t cipher_num, string filen
 	ct.close();
 };
 
-//Load all things, maybe also the engine
+//Load all things
 int load_ciphertext(SEALCiphertext* ciphertext, std::shared_ptr<hewrapper::SEALEngine> engine, size_t cipher_num, string filename)
 {
 	ifstream ct;

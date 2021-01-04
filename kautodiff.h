@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <fstream>
 #include "SEALEngine.h"
 #include "SEALHE.h"
 
@@ -145,6 +146,8 @@ typedef struct kad_node_t {
  */
 kad_node_t **kad_compile_array(int *n_node, int n_roots, kad_node_t **roots);
 
+void kad_allocate_internal(int n, kad_node_t **v);
+
 kad_node_t **kad_compile(int *n_node, int n_roots, ...); /* an alternative API to above */
 void kad_delete(int n, kad_node_t **a); /* deallocate a compiled/linearized graph */
 
@@ -253,8 +256,8 @@ int kad_size_encrypted_var(int n, kad_node_t *const* v);
 int kad_size_const(int n, kad_node_t *const* v); /* total size of all constants */
 
 /* graph I/O */
-int kad_save(FILE *fp, int n_node, kad_node_t **node);
-kad_node_t **kad_load(FILE *fp, int *_n_node);
+int kad_save(ostream & fs, int n_node, kad_node_t **node);
+kad_node_t **kad_load(istream & fs, int *_n_node);
 
 /* random number generator */
 void *kad_rng(void);

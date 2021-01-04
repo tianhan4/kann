@@ -7,6 +7,7 @@
 #include <cfloat>
 #include <cmath>
 #include <iostream>
+#include <fstream>
 #include <omp.h>
 #include "util.h"
 
@@ -132,6 +133,7 @@ static inline kad_node_t *kad_finalize_node(kad_node_t *s) /* a helper function 
 	if (i < s->n_child) s->flag |= KAD_VAR;
 	return s;
 }
+
 
 /********** Simple arithmetic **********/
 
@@ -404,7 +406,7 @@ static void kad_mark_back(int n, kad_node_t **v)
 //think carefully about the reallocation: we cannot afford calling it often.
 // allocate internal nodes memory.
 // Assumption: All internal nodes are encrypted.
-static void kad_allocate_internal(int n, kad_node_t **v)
+void kad_allocate_internal(int n, kad_node_t **v)
 {
 	int i, j;
 	kad_mark_back(n, v);
@@ -703,80 +705,87 @@ int len_num = kad_len(a[i]);
  * Load and save graph *
  ***********************/
 
-/**
-static void kad_save1(FILE *fp, const kad_node_t *p)
+
+static void kad_save1(std::ostream & fs, const kad_node_t *p)
 {
-	fwrite(&p->ext_label, 4, 1, fp);
-	fwrite(&p->ext_flag, 4, 1, fp);
-	fwrite(&p->flag, 1, 1, fp);
-    fwrite(&p->grad_flag, 1, 1, fp);
-	fwrite(&p->n_child, 4, 1, fp);
+	
+	fs.write(reinterpret_cast<const char *>(& p->ext_label), sizeof( p->ext_label));
+	fs.write(reinterpret_cast<const char *>(&p->ext_flag), sizeof(p->ext_flag));
+	fs.write(reinterpret_cast<const char *>(&p->flag), sizeof(p->flag));
+	fs.write(reinterpret_cast<const char *>(&p->grad_flag), sizeof(p->grad_flag));
+	fs.write(reinterpret_cast<const char *>(&p->n_child), sizeof(p->n_child));
+	cout << "save output:" << p->ext_label << p->ext_flag << p->flag << p->grad_flag << p->n_child << endl;
 	if (p->n_child) {
 		int32_t j, pre = p->pre? p->pre->tmp : -1;
-		fwrite(&p->op, 2, 1, fp);
+		fs.write(reinterpret_cast<const char *>(&p->op), sizeof(p->op));
 		for (j = 0; j < p->n_child; ++j)
-			fwrite(&p->child[j]->tmp, 4, 1, fp);
-		fwrite(&pre, 4, 1, fp);
-		fwrite(&p->ptr_size, 4, 1, fp);
+			fs.write(reinterpret_cast<const char *>(&p->child[j]->tmp), sizeof(p->child[j]->tmp));
+		fs.write(reinterpret_cast<const char *>(&pre), sizeof(pre));
+		fs.write(reinterpret_cast<const char *>(&p->ptr_size), sizeof(p->ptr_size));
 		if (p->ptr_size > 0 && p->ptr)
-			fwrite(p->ptr, p->ptr_size, 1, fp);
+			fs.write((char *)p->ptr , p->ptr_size);
 	} else {
-		fwrite(&p->n_d, 1, 1, fp);
-		if (p->n_d) fwrite(p->d, 4, p->n_d, fp);
+		fs.write(reinterpret_cast<const char *>(&p->n_d), sizeof(p->n_d));
+		if (p->n_d) fs.write((char *)p->d , p->n_d * 4);
 	}
 }
 
 
-static kad_node_t *kad_load1(FILE *fp, kad_node_t **node)
+static kad_node_t *kad_load1(std::istream & fs, kad_node_t **node)
 {
 	kad_node_t *p;
 	p = (kad_node_t*)calloc(1, sizeof(kad_node_t));
-	fread(&p->ext_label, 4, 1, fp);
-	fread(&p->ext_flag, 4, 1, fp);
-	fread(&p->flag, 1, 1, fp);
-    fread(&p->grad_flag, 1, 1, fp);
-	fread(&p->n_child, 4, 1, fp);
+	
+	fs.read(reinterpret_cast< char *>(& p->ext_label), sizeof( p->ext_label));
+	fs.read(reinterpret_cast< char *>(&p->ext_flag), sizeof(p->ext_flag));
+	fs.read(reinterpret_cast< char *>(&p->flag), sizeof(p->flag));
+	fs.read(reinterpret_cast< char *>(&p->grad_flag), sizeof(p->grad_flag));
+	fs.read(reinterpret_cast< char *>(&p->n_child), sizeof(p->n_child));
+	cout << "load output:" << p->ext_label << p->ext_flag << p->flag << p->grad_flag << p->n_child << endl;
 	if (p->n_child) {
 		int32_t j, k;
 		p->child = (kad_node_t**)calloc(p->n_child, sizeof(kad_node_t*));
-		fread(&p->op, 2, 1, fp);
+		fs.read(reinterpret_cast< char *>(&p->op), sizeof(p->op));
 		for (j = 0; j < p->n_child; ++j) {
-			fread(&k, 4, 1, fp);
+			fs.read(reinterpret_cast< char *>(&k), sizeof(k));
 			p->child[j] = node? node[k] : 0;
 		}
-		fread(&k, 4, 1, fp);
+		fs.read(reinterpret_cast< char *>(&k), sizeof(k));
 		if (k >= 0) p->pre = node[k];
-		fread(&p->ptr_size, 4, 1, fp);
+		fs.read(reinterpret_cast< char *>(&p->ptr_size), sizeof(p->ptr_size));
 		if (p->ptr_size > 0) {
 			p->ptr = malloc(p->ptr_size);
-			fread(p->ptr, p->ptr_size, 1, fp);
+			fs.read((char *)p->ptr, p->ptr_size);
 		}
 	} else {
-		fread(&p->n_d, 1, 1, fp);
-		if (p->n_d) fread(p->d, 4, p->n_d, fp);
+		fs.read(reinterpret_cast< char *>(&p->n_d), sizeof(p->n_d));
+		if (p->n_d) fs.read((char *) p->d, 4 * p->n_d);
 	}
 	return p;
 }
 
-int kad_save(FILE *fp, int n_node, kad_node_t **node)
+int kad_save(std::ostream & fs, int n_node, kad_node_t **node)
 {
 	int32_t i, k = n_node;
-	fwrite(&k, 4, 1, fp);
+	fs.write(reinterpret_cast<const char *>(&k), sizeof(k));
+	
+	cout << "save node num:" <<  k << endl;
 	for (i = 0; i < n_node; ++i) node[i]->tmp = i;
-	for (i = 0; i < n_node; ++i) kad_save1(fp, node[i]);
+	for (i = 0; i < n_node; ++i) kad_save1(fs, node[i]);
 	for (i = 0; i < n_node; ++i) node[i]->tmp = 0;
 	return 0;
 }
 
-kad_node_t **kad_load(FILE *fp, int *_n_node)
+kad_node_t **kad_load(std::istream & fs, int *_n_node)
 {
 	int32_t i, n_node;
 	kad_node_t **node;
-	fread(&n_node, 4, 1, fp);
+	fs.read(reinterpret_cast<char *>(&n_node), sizeof(n_node));
+	cout << "load node num:" <<  n_node << endl;
 	node = (kad_node_t**)malloc(n_node * sizeof(kad_node_t*));
 	for (i = 0; i < n_node; ++i) {
 		kad_node_t *p;
-		p = node[i] = kad_load1(fp, node);
+		p = node[i] = kad_load1(fs, node);
 		if (p->n_child) {//only nodes with child have op.
 			kad_op_list[p->op](p, KAD_ALLOC);
 			kad_op_list[p->op](p, KAD_SYNC_DIM);
@@ -786,7 +795,6 @@ kad_node_t **kad_load(FILE *fp, int *_n_node)
 	kad_mark_back(n_node, node);
 	return node;
 }
-**/
 
 
 /***************

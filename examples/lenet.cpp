@@ -16,14 +16,14 @@ static kann_t *lenet_gen(unsigned int n_labels)
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
     // lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
-    lenet = kann_layer_conv2d(lenet, 3, 5, 5, 1, 1, 1, 1);
+    lenet = kann_layer_conv2d(lenet, 1, 5, 5, 1, 1, 1, 1);
     lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
     // lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
-    lenet = kann_layer_conv2d(lenet, 3, 5, 5, 1, 1, 0, 0);
-    lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
+    //lenet = kann_layer_conv2d(lenet, 3, 5, 5, 1, 1, 0, 0);
+    //lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
     // lenet = kad_relu(kann_layer_dense(lenet, 120));
     // lenet = kad_relu(kann_layer_dense(lenet, 84));
-    lenet = kad_relu(kann_layer_dense(lenet, 100));
+    //lenet = kad_relu(kann_layer_dense(lenet, 10));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
@@ -92,7 +92,7 @@ int main(int argc, char *argv[])
 {
     int i, j, k;
     int max_epoch = 5, batch_size = 2000, max_drop_streak = 0;
-    float lr = 0.001f, frac_val = 0.1f;
+    float lr = 0.01f, frac_val = 0.1f;
     int total_samples, left_sample_num;
     int data_size, label_size;
     kann_data_t *data, *label;
@@ -133,7 +133,7 @@ int main(int argc, char *argv[])
     shuf.reserve(total_samples);
     for (i = 0; i < total_samples; ++i) shuf[i] = i;
     batch_num = total_samples % batch_size == 0? total_samples / batch_size : total_samples / batch_size + 1;
-    // batch_num = shuffle_and_encrypt_dataset(total_samples, batch_size, data, label, base_dir, shuf);
+    //batch_num = shuffle_and_encrypt_dataset(total_samples, batch_size, data, label, base_dir, shuf);
     if (batch_num < 0) {
         cout << "[error] batch num (" << batch_num << ") < 0" << endl;
         // goto free_data;

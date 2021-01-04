@@ -45,7 +45,10 @@
 
 #include "kautodiff.h"
 #include "SEALEngine.h"
+#include <fstream>
 #include "SEALHE.h"
+
+using namespace std;
 
 typedef struct {
 	int n;            /* number of nodes in the computational graph */
@@ -202,9 +205,9 @@ float kann_cost_fnn1(kann_t *ann, int n, SEALCiphertext **x, SEALCiphertext **y)
 SEALCiphertext *kann_apply1(kann_t *a, SEALCiphertext *x_c);
 
 /* model I/O */
-void kann_save_fp(FILE *fp, kann_t *ann);
+void kann_save_fp(ofstream * fs, kann_t *ann);
 void kann_save(const char *fn, kann_t *ann);
-kann_t *kann_load_fp(FILE *fp);
+kann_t *kann_load_fp(ifstream * fs);
 kann_t *kann_load(const char *fn);
 void init_environment(std::shared_ptr<SEALEngine> input_engine);
 

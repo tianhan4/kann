@@ -129,7 +129,7 @@ int main(int argc, char *argv[])
 	//1. read the model and data
 	kann_srand(seed);
 	in = kann_data_read(argv[optind]);
-total_samples = 128;
+	total_samples = 128;
 	// total_samples = in->n_row;
 	if (in_fn) {
 		ann = kann_load(in_fn);
