@@ -266,7 +266,7 @@ static int kann_class_error_core(const kann_t *ann, float *truth, int *base)
 					if (t_max < tk) t_max = tk, t_max_k = k;
 					if (x_max < xk) x_max = xk, x_max_k = k;
 				}
-				if (t_sum - 1.0f == 0 && t_min >= 0.0f && x_min >= 0.0f && x_max <= 1.0f) {
+				if (abs(t_sum - 1.0f) <= 0.0001f && t_min >= 0.0f && x_min >= 0.0f && x_max <= 1.0f) {
 					++(*base);
 					n_err += (x_max_k != t_max_k);
 					// cout << "predited class:" << x_max_k << "truth class:" << t_max_k << "error:" << (x_max_k != t_max_k);
@@ -661,6 +661,10 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 	SEALCiphertext *x_ptr, *y_ptr;
 	SEALCiphertext *min_x_c;
 
+	std::chrono::high_resolution_clock::time_point train_start, train_end, load_start, load_end;
+    std::chrono::microseconds training_dur(0), loading_dur(0);
+	long long training_time, loading_time;
+
 	n_in = kann_dim_in(ann);
 	n_out = kann_dim_out(ann);
 	if (n_in < 0 || n_out < 0) return -1;
@@ -679,7 +683,6 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 	min_x_c = (SEALCiphertext*)malloc(n_encrypted_var * sizeof(SEALCiphertext));
 	min_c = (float*)malloc(n_const * sizeof(float));
 
-
 	for (i = 0; i < max_epoch; ++i) {
 		int n_proc = 0, n_train_err = 0, n_val_err = 0, n_train_base = 0, n_val_base = 0;
 		double train_cost = 0.0, val_cost = 0.0;
@@ -687,7 +690,10 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 		int ret_size;
 		int b, c;
 		kann_switch(ann, 1);
+		training_time = 0;
+		loading_time = 0;
 		while (n_proc < n_train) {
+			load_start = chrono::high_resolution_clock::now();
 			batch_dir =  base_dir + "/" + to_string(n_proc);
 			ret_size = load_batch_ciphertext(_x, data_size, batch_dir, 0);
 			if (ret_size != data_size) {
@@ -699,6 +705,11 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 				cout << "[train ] load label return " << ret_size << ". expect " << label_size << endl;
 				goto train_exit;
 			}
+			load_end = chrono::high_resolution_clock::now();
+    		loading_dur = chrono::duration_cast<chrono::microseconds>(train_end - train_start);
+			loading_time += loading_dur.count();
+
+			train_start = chrono::high_resolution_clock::now();
 			x_ptr = _x.data(), y_ptr = _y.data();
 			kann_feed_bind(ann, KANN_F_IN,    0, &x_ptr);
 			kann_feed_bind(ann, KANN_F_TRUTH, 0, &y_ptr);
@@ -712,13 +723,18 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 						kann_SGD(kad_len(ann->v[k]), lr, 0, ann->v[k]->g, ann->v[k]->x);	
 				}
 			}
-			if (n_proc % 10 == 0) {
-				cout << "epoch: "<< i+1 << " batch: "<<n_proc<<"; training cost: " << train_cost / total_train_num;
-				c = kann_class_error(ann, _truth[n_proc].data(), &b);
-				cout << " (class error: " <<  100.0f * c / b << "%)" << endl;
-			}
+			// if (n_proc % 10 == 0) {
+			// 	cout << "epoch: "<< i+1 << " batch: "<<n_proc<<"; training cost: " << train_cost / total_train_num;
+			// 	c = kann_class_error(ann, _truth[n_proc].data(), &b);
+			// 	cout << " (class error: " <<  100.0f * c / b << "%)" << endl;
+			// }
 			n_proc += 1;
+			train_end = chrono::high_resolution_clock::now();
+    		training_dur = chrono::duration_cast<chrono::microseconds>(train_end - train_start);
+			training_time += training_dur.count();
 		}
+		cout << "Epoch " << i << " load time (us): " << loading_time
+			 << " train time (us): " << training_time << endl;
 		train_cost /= total_train_num;
 		kann_switch(ann, 0);
 		//TODO: fixed evaluation set. May cause some problems when used for real tasks.
@@ -764,7 +780,7 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 			} else if (++drop_streak >= max_drop_streak)
 				break;
 		}
-	}
+	} // for
 	if (min_set) {
 		std::memcpy(ann->x, min_x, (n_var - n_encrypted_var) * sizeof(float));
 		std::memcpy(ann->c, min_c, n_const * sizeof(float));

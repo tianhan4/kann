@@ -16,14 +16,16 @@ static kann_t *lenet_gen(unsigned int n_labels)
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
     // lenet = kann_layer_conv2d(lenet, 6, 5, 5, 1, 1, 1, 1);
-    lenet = kann_layer_conv2d(lenet, 1, 5, 5, 1, 1, 1, 1);
-    lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0); // 2x2 kernel; 0x0 stride; 0x0 padding
+    lenet = kann_layer_conv2d(lenet, 16, 8, 8, 2, 2, KAD_PAD_SAME, KAD_PAD_SAME);
+    lenet = kad_max2d(kad_relu(lenet), 2, 2, 1, 1, 0, 0); // 2x2 kernel; 1x1 stride; 0x0 padding
+    lenet = kann_layer_conv2d(lenet, 32, 4, 4, 2, 2, 0, 0);
+    lenet = kad_max2d(kad_relu(lenet), 2, 2, 1, 1, 0, 0); // 2x2 kernel; 1x1 stride; 0x0 padding
     // lenet = kann_layer_conv2d(lenet, 16, 5, 5, 1, 1, 0, 0);
     //lenet = kann_layer_conv2d(lenet, 3, 5, 5, 1, 1, 0, 0);
     //lenet = kad_max2d(kad_relu(lenet), 2, 2, 2, 2, 0, 0);
     // lenet = kad_relu(kann_layer_dense(lenet, 120));
     // lenet = kad_relu(kann_layer_dense(lenet, 84));
-    //lenet = kad_relu(kann_layer_dense(lenet, 10));
+    lenet = kad_relu(kann_layer_dense(lenet, 32));
 
     if (n_labels == 1)
         return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB), 0);
@@ -91,8 +93,8 @@ void setup_engine(int batch_size, const string& base_dir)
 int main(int argc, char *argv[])
 {
     int i, j, k;
-    int max_epoch = 5, batch_size = 2000, max_drop_streak = 0;
-    float lr = 0.01f, frac_val = 0.1f;
+    int max_epoch = 4, batch_size = 256, max_drop_streak = 0;
+    float lr = 0.15f, frac_val = 0.1f;
     int total_samples, left_sample_num;
     int data_size, label_size;
     kann_data_t *data, *label;
@@ -132,8 +134,8 @@ int main(int argc, char *argv[])
 
     shuf.reserve(total_samples);
     for (i = 0; i < total_samples; ++i) shuf[i] = i;
-    batch_num = total_samples % batch_size == 0? total_samples / batch_size : total_samples / batch_size + 1;
-    //batch_num = shuffle_and_encrypt_dataset(total_samples, batch_size, data, label, base_dir, shuf);
+    // batch_num = total_samples % batch_size == 0? total_samples / batch_size : total_samples / batch_size + 1;
+    batch_num = shuffle_and_encrypt_dataset(total_samples, batch_size, data, label, base_dir, shuf);
     if (batch_num < 0) {
         cout << "[error] batch num (" << batch_num << ") < 0" << endl;
         // goto free_data;
@@ -156,49 +158,6 @@ int main(int argc, char *argv[])
     cout << "save encrypted ciphertext in " << base_dir << endl;
 
     //=======
-    // vector<SEALCiphertext> _x(data_size);
-    // vector<SEALCiphertext> _y(label_size);
-    // string batch_dir =  base_dir + "/" + to_string(0);
-    // int ret_size = load_batch_ciphertext(_x, data_size, batch_dir, 0);
-    // if (ret_size != data_size) {
-    //     cout << "[train ] load data return " << ret_size << ". expect " << data_size << endl;
-    // }
-    // ret_size = load_batch_ciphertext(_y, label_size, batch_dir, 1);
-    // if (ret_size != label_size) {
-    //     cout << "[train ] load label return " << ret_size << ". expect " << label_size << endl;
-    // }
-    // SEALPlaintext result_p;
-    // vector<double> tmp_v(3);
-    // vector<vector<double>> result_v(3, vector<double>(data_size));
-    // for (j = 0; j < data_size; ++j) {
-    //     engine->decrypt(_x[j], result_p);
-    //     engine->decode(result_p, tmp_v);
-    //     for (k = 0; k < 3; ++k)
-    //         result_v[k][j] = tmp_v[k];
-    // }
-    // for (k = 0; k < 3; ++k) {
-    //     cout << "data: " << k << endl;
-    //     print_vector(result_v[k]);
-    //     result_v[k].resize(label_size);
-    // }
-    // for (j = 0; j < label_size; ++j) {
-    //     engine->decrypt(_y[j], result_p);
-    //     engine->decode(result_p, tmp_v);
-    //     for (k = 0; k < 3; ++k)
-    //         result_v[k][j] = tmp_v[k];
-    // }
-    // for (k = 0; k < 3; ++k) {
-    //     cout << "label: " << k << endl;
-    //     print_vector(result_v[k]);
-    // }
-    // delete[] plaintext;
-	// delete[] ciphertext;
-	// delete[] t;
-	// delete[] truth_t;
-	// delete[] test_t;
-    // return 0;
-
-    //=======
 
     lenet = lenet_gen(label_size);
 
@@ -206,8 +165,14 @@ int main(int argc, char *argv[])
     cout << "CNN Training" << endl;
     time_start = chrono::high_resolution_clock::now();
 
-    kann_train_fnn1(lenet, lr, max_epoch, max_drop_streak, frac_val, batch_num - 1,
-        base_dir, data_size, label_size, truth);
+    try{
+        kann_train_fnn1(lenet, lr, max_epoch, max_drop_streak, frac_val, batch_num - 1,
+            base_dir, data_size, label_size, truth);
+    }
+    catch(...) {
+        cout << "catch exception" << endl;
+    }
+    
 
     time_end = chrono::high_resolution_clock::now();
     training_time = chrono::duration_cast<chrono::microseconds>(time_end - time_start);

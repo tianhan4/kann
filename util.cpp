@@ -292,7 +292,7 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 	int left_sample_num, current_sample_id, current_cipher_id, cipher_num, sample_size;
 	string engine_file;
 
-	// struct stat s_buf;
+	struct stat s_buf;
 
 	if (!data || !label) {
 		cout << "data or label is null pointer" << endl;
@@ -304,14 +304,15 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 		return -1;
 	}
 
-	// if (!stat(output_dir.c_str(),&s_buf)) {
-	// 	cout << output_dir << " already exists" << endl;
-	// 	return -1;
-	// }
-    // if (mkdir(output_dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH)) {
-    //     cout << "fail to create dir " << output_dir << endl;
-    //     return -1;
-	// }
+	cipher_num = total_samples % mini_size == 0? total_samples / mini_size : total_samples / mini_size + 1;
+	if (!stat(output_dir.c_str(),&s_buf)) {
+		cout << output_dir << " already exists" << endl;
+		return cipher_num;
+	}
+    if (mkdir(output_dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH)) {
+        cout << "fail to create dir " << output_dir << endl;
+        return -1;
+	}
 
 	shuf.clear();
 	shuf.reserve(total_samples);
@@ -325,8 +326,7 @@ int shuffle_and_encrypt_dataset(int total_samples, int mini_size, kann_data_t *d
 	//batching: in secure training we can use different batch size for every batch. 
 	left_sample_num = total_samples;
 	current_sample_id = 0;
-	current_cipher_id = 0;
-	cipher_num = total_samples % mini_size == 0? total_samples / mini_size : total_samples / mini_size + 1;	
+	current_cipher_id = 0;	
 
 	while (left_sample_num > 0) {
 		sample_size = left_sample_num > 10 * mini_size ? 10 * mini_size : left_sample_num;
