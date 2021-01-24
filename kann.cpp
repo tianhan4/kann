@@ -706,7 +706,7 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 				goto train_exit;
 			}
 			load_end = chrono::high_resolution_clock::now();
-    		loading_dur = chrono::duration_cast<chrono::microseconds>(train_end - train_start);
+    		loading_dur = chrono::duration_cast<chrono::microseconds>(load_end - load_start);
 			loading_time += loading_dur.count();
 
 			train_start = chrono::high_resolution_clock::now();
@@ -735,6 +735,9 @@ int kann_train_fnn1(kann_t *ann, float lr, int max_epoch, int max_drop_streak, f
 		}
 		cout << "Epoch " << i << " load time (us): " << loading_time
 			 << " train time (us): " << training_time << endl;
+		cout << "epoch: "<< i+1 << " batch: "<<n_proc<<"; training cost: " << train_cost / total_train_num;
+		c = kann_class_error(ann, _truth[n_train-1].data(), &b);
+		cout << " (class error: " <<  100.0f * c / b << "%)" << endl;
 		train_cost /= total_train_num;
 		kann_switch(ann, 0);
 		//TODO: fixed evaluation set. May cause some problems when used for real tasks.
