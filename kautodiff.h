@@ -102,6 +102,9 @@ extern vector<double> *t;
 extern vector<double> *test_t;   
 extern vector<double> *truth_t;
 
+extern int test_bandwidth_download; //MBit/s
+extern int test_bandwidth_upload; //MBit/s
+
 typedef struct branch_wave_t{
     uint8_t wave_id; //identify wave for each branch.
     SEALCiphertext *current_peak;
@@ -274,6 +277,7 @@ void kad_saxpy(int n, SEALCiphertext &a, const SEALCiphertext *x, SEALCiphertext
 void kad_trap_fe(void); /* abort on divide-by-zero and NaN */
 void kad_print_graph(FILE *fp, int n, kad_node_t **v);
 void kad_check_grad(int n, kad_node_t **a, int from);
+void accumulate_times_layer(int n, kad_node_t ** a, int from, int repeat, vector<pair<int, string>> &recorded_layers, vector<int> &forward_times, vector<int> &backward_times, vector<int> &other_times);
 
 #define KAD_ALLOC      1
 #define KAD_FORWARD    2

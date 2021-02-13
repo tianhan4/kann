@@ -194,6 +194,7 @@ kad_node_t *kann_new_weight_conv2d(int n_out, int n_in, int k_row, int k_col, bo
 kad_node_t *kann_new_weight_conv1d(int n_out, int n_in, int kernel_len, bool is_encrypted);
 
 kad_node_t *kann_new_leaf2(int *offset, kad_node_p *par, uint8_t flag, float x0_01, bool is_encrypted, int n_d,  ...);
+kad_node_t *kann_layer_bias(kad_node_t *in, bool b_is_encrypted);
 kad_node_t *kann_layer_dense2(int *offset, kad_node_p *par, kad_node_t *in, int n1, bool w_is_encrypted, bool b_is_encrypted);
 kad_node_t *kann_layer_dropout2(int *offset, kad_node_p *par, kad_node_t *t, float r);
 //kad_node_t *kann_layer_layernorm2(int *offset, kad_node_t **par, kad_node_t *in);
@@ -214,4 +215,8 @@ void init_environment(std::shared_ptr<SEALEngine> input_engine);
 /* new add */
 void kann_SGD(int n, float h0, const float *h, const float *g, float *t);
 void kann_SGD(int n, float h0, const float *h, SEALCiphertext *g, SEALCiphertext *t);
+
+/* timer */
+void time_layer(kann_t * ann, int repeat, vector<pair<int, string>> &recorded_layers, vector<int> &forward_times, vector<int> &backward_times, vector<int> &other_times,int &fp_time, int &bp_time, int &all_time,
+const string& base_dir, int data_size, int label_size);
 #endif

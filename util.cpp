@@ -124,6 +124,13 @@ void print_ciphertext(SEALCiphertext *cipher){
 	print_vector(t[0]);
 }
 
+/**
+ * Print model information.
+ * int from: print nodes from 0 to the node "from";
+ * bool data: weather print the data values;
+ * bool grad: weather print the gradient information;
+ * ps: the values of gradients will be printed when and only when the data and grad are both true.
+ * */
 void print_model(kann_t * model, int from, bool data, bool grad){
 	int i,j;
 	assert(from < model->n);

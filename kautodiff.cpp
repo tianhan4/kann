@@ -628,29 +628,8 @@ const SEALCiphertext *kad_eval_at(int n, kad_node_t **a, int from)
 	return a[from]->x_c;
 }
 
-// BP from the 'from' node, where the initial gradient resides.
-void kad_grad(int n, kad_node_t **a, int from, bool add_noise, double learning_rate)
-{
-	int i, j;
-	if (from < 0 || from >= n) from = n - 1;
-	assert(a[from]->n_d == 0); // the 'from' node should be a scalar node.
-	for (i = 0; i < n; ++i) a[i]->tmp = (i == from);
-	kad_propagate_marks(n, a);
-	for (i = 0; i <= from; ++i) /* set all grandients to zero */{
-        if (a[i]->tmp >0){ //feed doesn't have gradient.
-			if ((a[i]->g))
-				memset(a[i]->g, 0, kad_len(a[i]) * sizeof(float));
-			if ((a[i]->g_c) && !(a[i]->ext_flag & KAD_X_G_SHARED))
-            	for(j = 0; j < kad_len(a[i]); j++) a[i]->g_c[j].clean() = true;
-        }
-    }
-	for (i = from, a[i]->g[0] = 1; i >= 0; --i){ /* backprop */
-		if (a[i]->n_child && a[i]->tmp > 0){
-			// cout << "back propagating :" << i << " op " << kad_op_name[a[i]->op] << endl;
-			kad_op_list[a[i]->op](a[i], KAD_BACKWARD);
-        }
-	}
-
+void _sum_gradients(int n, kad_node_t **a, int from, bool add_noise, double learning_rate){
+	int i,j = 0;
 	//sum encrypted gradients
 	for (i = 0; i <= from; ++i){
 		//cout << "sum node:" << i << endl;
@@ -697,6 +676,31 @@ int len_num = kad_len(a[i]);
 			}
 		}
 	}
+}
+
+// BP from the 'from' node, where the initial gradient resides.
+void kad_grad(int n, kad_node_t **a, int from, bool add_noise, double learning_rate)
+{
+	int i, j;
+	if (from < 0 || from >= n) from = n - 1;
+	assert(a[from]->n_d == 0); // the 'from' node should be a scalar node.
+	for (i = 0; i < n; ++i) a[i]->tmp = (i == from);
+	kad_propagate_marks(n, a);
+	for (i = 0; i <= from; ++i) /* set all grandients to zero */{
+        if (a[i]->tmp >0){ //feed doesn't have gradient.
+			if ((a[i]->g))
+				memset(a[i]->g, 0, kad_len(a[i]) * sizeof(float));
+			if ((a[i]->g_c) && !(a[i]->ext_flag & KAD_X_G_SHARED))
+            	for(j = 0; j < kad_len(a[i]); j++) a[i]->g_c[j].clean() = true;
+        }
+    }
+	for (i = from, a[i]->g[0] = 1; i >= 0; --i){ /* backprop */
+		if (a[i]->n_child && a[i]->tmp > 0){
+			// cout << "back propagating :" << i << " op " << kad_op_name[a[i]->op] << endl;
+			kad_op_list[a[i]->op](a[i], KAD_BACKWARD);
+        }
+	}
+	_sum_gradients(n, a, from, add_noise, learning_rate);	
 	for (i = 0; i <= from; ++i) a[i]->tmp = 0;
 
 }
@@ -1252,7 +1256,7 @@ int kad_op_cmul(kad_node_t *p, int action)
 	} else if (action == KAD_BACKWARD) {
 
 		if (kad_is_back(q[1]) && q[0]->x_c)
-			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c, true); /* G_w <- trans(G_y) * X */
+			kad_sgemm_simple(1, 0, n_b_row, n_col, n_a_row, p->g_c, q[0]->x_c, q[1]->g_c); /* G_w <- trans(G_y) * X */
 
 		//after optimizing , cmul/conv2d need to clean the previous gradients by ourselves.
 		//if (kad_is_back(q[0]))
@@ -1801,7 +1805,8 @@ int kad_op_ce_multi(kad_node_t *p, int action)
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
         if (remote){
-            assert(false);
+			assert(false);
+			//sendToClient(y1->x_c, n1, y0->x_c, n1, p->x_c, 1, CE_MULTI_FP);
         }else{
 			int batch_size = y1->x_c[0].size();
             if (c == 0) {
@@ -2031,12 +2036,18 @@ int kad_op_relu(kad_node_t *p, int action)
 #pragma omp for
             for (i = 0; i < n; i++){
 				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+				//auto start = std::chrono::steady_clock::now();
                 engine->decrypt(q->x_c[i], plaintext[thread_mod_id]);
                 engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
                 for (j = 0; j < t[thread_mod_id].size(); ++j)
                     t[thread_mod_id][j] = t[thread_mod_id][j] > 0.0f? t[thread_mod_id][j] : 0.0f;
                 engine->encode(t[thread_mod_id], plaintext[thread_mod_id]);
+				//auto end1 = std::chrono::steady_clock::now();
                 engine->encrypt(plaintext[thread_mod_id], p->x_c[i]);
+				//auto end2 = std::chrono::steady_clock::now();
+				//auto interval = (std::chrono::duration_cast<std::chrono::microseconds>(end1 - start)).count();
+				//auto interval2 = (std::chrono::duration_cast<std::chrono::microseconds>(end2 - end1)).count();
+				//cout << n << ":" << interval << " " << interval2 << "microseconds" << endl;
             }
 
 }
@@ -2403,7 +2414,7 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
                 } /* ~k, c0, c1, n */ \
 	} while (0)
 
-    int l ,i ;
+    int l ,i;
 	conv_conf_t *aux = (conv_conf_t*)p->ptr;
 	kad_node_t *q = p->child[0], *w = p->child[1];
 	SEALCiphertext *t1 = 0, *q1 = 0, *w1 = 0, *x_padded = 0;
@@ -2430,7 +2441,6 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
                 p->x_c[l].clean() = true;
             conv2d_loop1(q->x_c, w->x_c, p->x_c, t1, process_row_for);
             //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
-			
         }else{
 		    //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
             for (l = 0; l < kad_len(p); l++)
@@ -2539,19 +2549,51 @@ int kad_op_max2d(kad_node_t *p, int action)
 }
         }
 	} else if (action == KAD_BACKWARD) {
-		int *f = (int*)p->gtmp;
+        if (remote){
+            assert(false);
+        }
+        else{
+		//do something like decrypt/encrypt
+
 		int in_len = kad_len(q);
 		int out_len = kad_len(p);
+		int *f = (int*)p->gtmp; //in remote this should be encrypted.
+#pragma omp parallel
+{
+#pragma omp for
+            for (int i=0; i< out_len; i++){
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+				engine->decrypt(p->g_c[i], plaintext[thread_mod_id]);
+				engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
+            }
+}
+				// do nothing.				
+#pragma omp parallel
+{
+#pragma omp for
+            for (int i=0; i< in_len; i++){
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+				engine->encode(t[thread_mod_id], plaintext[thread_mod_id]);
+				engine->encrypt(plaintext[thread_mod_id], ciphertext[thread_mod_id]);
+				for (int j = 0; j < out_len; ++j){
+					if(f[j] == i)seal_add_inplace(q->g_c[i],p->g_c[j]);
+				}				
+            }
+}
+
 // a makeshift to work around the data race on the input pixel.
 #pragma omp parallel
 {
 #pragma omp for
-		for (int i = 0; i < in_len; ++i){
-			for (int j = 0; j < out_len; ++j){
-				if(f[j] == i)seal_add_inplace(q->g_c[i],p->g_c[j]);
+			for (int i = 0; i < in_len; ++i){
+				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+				
+										//engine->decrypt(q->x_c[in_po], plaintext[thread_mod_id]);
+										//engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
+
 			}
-		}
 }
+		}
 	}
 	return 0;
 }
@@ -2902,3 +2944,91 @@ void kad_check_grad(int n, kad_node_t **a, int from)
 	} else std::fprintf(stderr, "skipped\n");
 	std::free(delta); std::free(g0);
 }
+
+void accumulate_times_layer(int n, kad_node_t ** a, int from, int repeat, vector<pair<int, string>> &recorded_layers, vector<int> &forward_times, vector<int> &backward_times, vector<int> &other_times){
+	std::chrono::steady_clock::time_point start, end;
+	int i, j, k, l;
+	recorded_layers.clear();
+	forward_times.clear();
+	backward_times.clear();
+	recorded_layers.reserve(n);
+	forward_times.reserve(n);
+	backward_times.reserve(n);
+	other_times = vector<int>(2,0);
+	//forwarding 
+	if(!seal_is_encrypted(a[from])){
+		throw invalid_argument("Only evaluate ciphertext for now.");
+	}
+	if (from < 0 || from >= n) from = n - 1;
+	for (i = 0; i < n; ++i) a[i]->tmp = (i == from);
+	kad_propagate_marks(n, a);
+	for (i = 0; i < repeat + 1; i++){
+		int idx = 0;
+		for (j = 0; j < n; ++j)
+			if (a[j]->n_child && a[j]->tmp > 0){
+				start = std::chrono::steady_clock::now();
+				kad_op_list[a[j]->op](a[j], KAD_FORWARD);
+				end = std::chrono::steady_clock::now();
+				auto interval = (std::chrono::duration_cast<std::chrono::milliseconds>(end - start)).count();
+				if(i == 0){
+					recorded_layers.push_back(pair<int,string>(j, string{kad_op_name[a[j]->op]}));
+					forward_times.push_back(0);
+					idx++;
+				}
+				else{
+					forward_times[idx++] += interval;
+				}
+			}
+		//backwarding
+		for (j = 0; j <= from; ++j) /* set all grandients to zero */{
+			if (a[j]->tmp >0){ //feed doesn't have gradient.
+				if ((a[j]->g))
+					memset(a[j]->g, 0, kad_len(a[j]) * sizeof(float));
+				if ((a[j]->g_c) && !(a[j]->ext_flag & KAD_X_G_SHARED))
+					for(k = 0; k < kad_len(a[j]); k++) a[j]->g_c[k].clean() = true;
+			}
+		}
+		for (j = from, a[j]->g[0] = 1; j >= 0; --j){ /* backprop */
+			if (a[j]->n_child && a[j]->tmp > 0){
+				start = std::chrono::steady_clock::now();
+				kad_op_list[a[j]->op](a[j], KAD_BACKWARD);
+				end = std::chrono::steady_clock::now();
+				auto interval = (std::chrono::duration_cast<std::chrono::milliseconds>(end - start)).count();
+
+				if(i == 0){
+					backward_times.push_back(0);
+					idx--;
+				}
+				else
+					backward_times[--idx] += interval; //backwards: from the end to the start
+			}
+		}
+		//sum_gradents
+		start = std::chrono::steady_clock::now();
+		_sum_gradients(n, a, from, 1, -0.1);	
+		end = std::chrono::steady_clock::now();
+		auto interval = (std::chrono::duration_cast<std::chrono::milliseconds>(end - start)).count();
+		if(i>0)
+			other_times[0] += interval;
+
+		//update_gradients
+		start = std::chrono::steady_clock::now();
+		for (k = 0; k <= from; k++){
+			if (kad_is_var(a[k])){
+				if(seal_is_encrypted(a[k]))
+					kann_SGD(kad_len(a[k]), -1, 0, a[k]->g_c, a[k]->x_c);
+				else
+					kann_SGD(kad_len(a[k]), -1, 0, a[k]->g, a[k]->x);	
+			}
+		}
+		end = std::chrono::steady_clock::now();
+		interval = (std::chrono::duration_cast<std::chrono::milliseconds>(end - start)).count();
+		if(i>0)
+			other_times[1] += interval;
+	}
+	for (i = 0; i <= from; ++i) a[i]->tmp = 0;
+}
+
+//static void simulatedClient(){
+//	cout << "Temporarily use simulated client." << endl;
+//}

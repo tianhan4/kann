@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <chrono>
 #include <omp.h>
 #include "kann.h"
 #include "util.h"
@@ -458,6 +459,17 @@ kad_node_t *kann_new_leaf2(int *offset, kad_node_p *par, uint8_t flag, float x0_
 	return kann_new_leaf_array(offset, par, flag, x0_01, n_d, d, is_encrypted);
 }
 
+
+kad_node_t *kann_layer_bias2(int *offset, kad_node_p *par, kad_node_t *in, bool b_is_encrypted)
+{
+	int n0;
+	kad_node_t *w, *b;
+	n0 = kad_len(in);
+	b = kann_new_leaf2(offset, par, KAD_VAR, 0.0f, b_is_encrypted, 1, n0);
+	//return kad_cmul(kad_add(in, b), w);
+	return kad_add(in, b);
+}
+
 kad_node_t *kann_layer_dense2(int *offset, kad_node_p *par, kad_node_t *in, int n1, bool w_is_encrypted, bool b_is_encrypted)
 {
 	int n0;
@@ -518,7 +530,7 @@ kad_node_t *kann_layer_input(int n1)
 	t = kad_feed(1, n1), t->ext_flag |= KANN_F_IN;
 	return t;
 }
-
+kad_node_t *kann_layer_bias(kad_node_t *in, bool b_is_encrypted) { return kann_layer_bias2(0, 0, in, b_is_encrypted); }
 kad_node_t *kann_layer_dense(kad_node_t *in, int n1, bool w_is_encrypted, bool b_is_encrypted) { return kann_layer_dense2(0, 0, in, n1, w_is_encrypted, b_is_encrypted); }
 kad_node_t *kann_layer_dropout(kad_node_t *t, float r) { return kann_layer_dropout2(0, 0, t, r); }
 //kad_node_t *kann_layer_layernorm(kad_node_t *in) { return kann_layer_layernorm2(0, 0, in); }
@@ -826,4 +838,66 @@ SEALCiphertext *kann_apply1(kann_t *a, SEALCiphertext *x_c)
 	kann_feed_bind(a, KANN_F_IN, 0, &x_c);
 	kad_eval_at(a->n, a->v, i_out);
 	return a->v[i_out]->x_c;
+}
+
+	/**
+	 * Record the running times for each layer, for forward as well as backward propagation.
+	 * Ps: This function presumes that ann is already runnable with bound inputs.
+	 * Argument:
+	 * 	repeat: int, repeat time for statistical average;
+	 * 	forward_times: vector<int>, store the running times of forwarding for layers in ms;
+	 * 	backward_times: vector<int>, store the running times of backwarding for layers in ms;
+	 * 	vector_size: int, store the size of the generated vectors.
+	 **/
+void time_layer(kann_t * ann, int repeat, vector<pair<int, string>> &recorded_layers, vector<int> &forward_times, vector<int> &backward_times, vector<int> &other_times, int &fp_time, int &bp_time, int &all_time,
+const string& base_dir, int data_size, int label_size){
+	assert(repeat > 0);
+	int i = 0;
+	int ret_size = 0;
+	kad_node_t ** a = ann->v;
+	int n = ann->n;
+	int i_cost = kann_find(ann, KANN_F_COST, 0);
+	string batch_dir = base_dir + "/0";
+	vector<SEALCiphertext> _x(data_size); 
+    vector<SEALCiphertext> _y(label_size);
+	SEALCiphertext *x_ptr, *y_ptr;
+
+	// 1. load the data/label
+	ret_size = load_batch_ciphertext(_x, data_size, batch_dir, 0);
+	if (ret_size != data_size) {
+		cout << "[train ] load data return " << ret_size << ". expect " << data_size << endl;
+		return;
+	}
+	ret_size = load_batch_ciphertext(_y, label_size, batch_dir, 1);
+	if (ret_size != label_size) {
+		cout << "[train ] load label return " << ret_size << ". expect " << label_size << endl;
+		return;
+	}
+	x_ptr = _x.data(), y_ptr = _y.data();
+	kann_feed_bind(ann, KANN_F_IN,    0, &x_ptr);
+	kann_feed_bind(ann, KANN_F_TRUTH, 0, &y_ptr);
+
+	// 2. forwarding/backwording and recoding the timer
+	accumulate_times_layer(n, a, i_cost, repeat, recorded_layers, forward_times, backward_times, other_times);
+
+	for (i = 0; i < forward_times.size(); i++){
+		forward_times[i] /= static_cast<double>(repeat);
+		backward_times[i] /= static_cast<double>(repeat); 
+	}
+	for (i = 0; i < other_times.size(); i++){
+		other_times[i] /= static_cast<double>(repeat);
+	}
+
+	// 3. calculate the forward, backward, full time.
+	fp_time = 0;
+	bp_time = 0;
+	all_time = 0;
+	for (i = 0; i < forward_times.size(); i++){
+		fp_time += forward_times[i];
+		bp_time += backward_times[i]; 
+	}
+	all_time = fp_time + bp_time;
+	for (i = 0; i < other_times.size(); i++){
+		all_time += other_times[i];
+	}	
 }
