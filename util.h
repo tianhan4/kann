@@ -10,6 +10,24 @@ using namespace std;
 #define DATA_FILE	"data"
 #define LABEL_FILE	"label"
 
+/**
+void load_from_pb_tensor(float *target, pb::HETensor * pb_tensor, size_t size, std::shared_ptr<SEALEngine> engine);
+
+pb::HETensor write_to_pb_tensors(float *source, size_t size);
+
+void load_from_pb_tensor(std::vector<SEALCiphertext> &target, size_t offset, pb::HETensor * pb_tensor, std::shared_ptr<SEALEngine> engine);
+
+pb::HETensor write_to_pb_tensors(std::vector<SEALCiphertext> &source, size_t offset, size_t size, std::shared_ptr<SEALEngine> engine);
+
+void load_from_pb_tensor(SEALCiphertext * target, size_t offset, pb::HETensor * pb_tensor, std::shared_ptr<SEALEngine> engine);
+
+pb::HETensor write_to_pb_tensors(SEALCiphertext* source, size_t offset, size_t size, std::shared_ptr<SEALEngine> engine);
+**/
+template <typename T>
+inline std::unordered_map<std::string, std::pair<std::string, std::vector<double>>>
+map_to_double_map(
+    const std::unordered_map<std::string, std::pair<std::string, std::vector<T>>>& inputs);
+
 template<typename T>
 inline void print_vector(std::vector<T> vec, size_t print_size = 4, int prec = 3);
 

@@ -16,6 +16,109 @@
 using namespace std;
 
 
+/**
+// load ciphertext/raw values from pb tensors
+void load_from_pb_tensor(float *target, pb::HETensor * pb_tensor, size_t size, std::shared_ptr<SEALEngine> engine){
+	assert(target != nullptr && "HETensor is empty");
+	const auto* raw_data = pb_tensor->mutable_data()->Mutable(0)->mutable_plain()->mutable_data();
+	std::memcpy(target, raw_data, sizeof(float) * size);
+}
+
+// write to pb tensors from ciphertext/raw values
+pb::HETensor write_to_pb_tensors(float *source, size_t size){
+	pb::HETensor pb_tensor;
+	// Populate attributes of tensor to estimate byte size
+	if (size>0) {
+		auto* mutable_data = pb_tensor.mutable_data();
+		mutable_data->Add();
+		mutable_data->Mutable(0)->mutable_plain()->Reserve(size);
+		auto* mutable_plain= mutable_data->Mutable(0)->mutable_plain()->mutable_data();
+		std::memcpy(mutable_plain, source, sizeof(float) * size);
+	}
+	return pb_tensor;
+}
+
+// load ciphertext/raw values from pb tensors
+void load_from_pb_tensor(std::vector<SEALCiphertext> &target, size_t offset, pb::HETensor * pb_tensor, std::shared_ptr<SEALEngine> engine){
+	size_t result_count = pb_tensor->data_size();
+	target.reserve(offset + result_count);
+	#pragma omp parallel for
+	// NOLINTNEXTLINE
+	for (size_t result_idx = 0; result_idx < result_count; ++result_idx) {
+		istringstream str(pb_tensor->data(result_idx).ciphertext());
+		target[result_idx + offset].load(str, engine);
+		target[result_idx + offset].init(engine);
+	}
+}
+
+// write to pb tensors from ciphertext/raw values
+pb::HETensor write_to_pb_tensors(std::vector<SEALCiphertext> &source, size_t offset, size_t size, std::shared_ptr<SEALEngine> engine){
+	pb::HETensor pb_tensors;
+	// Populate attributes of tensor to estimate byte size
+	if (size>0) {
+		auto* mutable_data = pb_tensors.mutable_data();
+		for (size_t data_idx = 0; data_idx < size; ++data_idx) {
+			mutable_data->Add();
+		}
+		#pragma omp parallel for
+		// NOLINTNEXTLINE
+		for (size_t data_idx = 0; data_idx < size; ++data_idx) {
+			ostringstream str(*mutable_data->Mutable(data_idx)->mutable_ciphertext());
+			source[data_idx + offset].save(str);
+		}
+	}
+	return pb_tensors;
+}
+
+// load ciphertext/raw values from pb tensors
+void load_from_pb_tensor(SEALCiphertext *target, size_t offset, pb::HETensor * pb_tensor, std::shared_ptr<SEALEngine> engine){
+	size_t result_count = pb_tensor->data_size();
+	#pragma omp parallel for
+	// NOLINTNEXTLINE
+	for (size_t result_idx = 0; result_idx < result_count; ++result_idx) {
+		istringstream str(pb_tensor->data(result_idx).ciphertext());
+		target[result_idx + offset].load(str, engine);
+		target[result_idx + offset].init(engine);
+	}
+}
+
+// write to pb tensors from ciphertext/raw values
+pb::HETensor write_to_pb_tensors(SEALCiphertext *source, size_t offset, size_t size, std::shared_ptr<SEALEngine> engine){
+	pb::HETensor pb_tensors;
+	// Populate attributes of tensor to estimate byte size
+	if (size>0) {
+		auto* mutable_data = pb_tensors.mutable_data();
+		for (size_t data_idx = 0; data_idx < size; ++data_idx) {
+			mutable_data->Add();
+		}
+		#pragma omp parallel for
+		// NOLINTNEXTLINE
+		for (size_t data_idx = 0; data_idx < size; ++data_idx) {
+			ostringstream str(*mutable_data->Mutable(data_idx)->mutable_ciphertext());
+			source[data_idx + offset].save(str);
+		}
+	}
+	return pb_tensors;
+}
+**/
+template <typename T>
+inline std::unordered_map<std::string,
+                          std::pair<std::string, std::vector<double>>>
+map_to_double_map(
+    const std::unordered_map<std::string,
+                             std::pair<std::string, std::vector<T>>>& inputs) {
+  std::unordered_map<std::string, std::pair<std::string, std::vector<double>>>
+      outputs;
+
+  for (const auto& elem : inputs) {
+    std::vector<double> double_inputs{elem.second.second.begin(),
+                                      elem.second.second.end()};
+    outputs.insert(
+        {elem.first, std::make_pair(elem.second.first, double_inputs)});
+  }
+  return outputs;
+}
+
 void save_engine(std::shared_ptr<hewrapper::SEALEngine> engine, string filename, bool is_rotate, bool is_decrypt){
 	
 	ofstream en;
