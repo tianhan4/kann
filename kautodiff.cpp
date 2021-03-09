@@ -1,3 +1,4 @@
+
 #include "kautodiff.h"
 #include <cstdlib>
 #include <cassert>
@@ -10,13 +11,13 @@
 #include <fstream>
 #include <omp.h>
 #include "util.h"
+#include "NetIO.h"
 
 #ifndef _DEBUG // works in VS
 #define DEBUG(x) 
 #else
 #define DEBUG(x) do { std::cerr << x << std::endl; } while (0)
 #endif
-bool remote = false; 
 std::shared_ptr<SEALEngine> engine;
 SEALPlaintext *plaintext;
 SEALCiphertext *ciphertext;
@@ -204,11 +205,6 @@ static inline int conv_find_par(int in_size, int kernel_size, int stride, int pa
 	*new_pad1 = pad_both - *new_pad0;
 	return out_size;
 }
-
-typedef struct {
-	int kernel_size, stride, pad[2];
-} conv_conf_t;
-
 
 // create cnn related information: strides, paddings and kernel sizes.
 static inline conv_conf_t *conv2d_gen_aux(int in_row, int in_col, int kernel_r, int kernel_c, int stride_r, int stride_c, int top_pad, int left_pad)
@@ -403,7 +399,7 @@ static void kad_mark_back(int n, kad_node_t **v)
 	}
 }
 
-//think carefully about the reallocation: we cannot afford calling it often.
+// think carefully about the reallocation: we cannot afford calling it often.
 // allocate internal nodes memory.
 // Assumption: All internal nodes are encrypted.
 void kad_allocate_internal(int n, kad_node_t **v)
@@ -499,6 +495,9 @@ kad_node_t **kad_compile_array(int *n_node, int n_roots, kad_node_t **roots)
 		kad_node_p t;
 		t = a.a[i], a.a[i] = a.a[a.n-1-i], a.a[a.n-1-i] = t;
 	}
+	/* set the node id */
+	for (i = 0; i < (int)a.n; i++)
+		a.a[i]->layer_mark = i;
 	kad_allocate_internal(a.n, a.a);
 
 	*n_node = a.n;
@@ -608,7 +607,7 @@ void kad_eval_marked(int n, kad_node_t **a)
 	kad_propagate_marks(n, a);
 	for (i = 0; i < n; ++i)
 		if (a[i]->n_child && a[i]->tmp > 0){
-			// cout << "forwarding node :" << i << " op " << kad_op_name[a[i]->op] << endl;
+			cout << "forwarding node :" << i << " op " << kad_op_name[a[i]->op] << endl;
 			kad_op_list[a[i]->op](a[i], KAD_FORWARD);
 			//kad_op_cmul(a[i], KAD_FORWARD, a);
 		}
@@ -631,48 +630,85 @@ const SEALCiphertext *kad_eval_at(int n, kad_node_t **a, int from)
 void _sum_gradients(int n, kad_node_t **a, int from, bool add_noise, double learning_rate){
 	int i,j = 0;
 	//sum encrypted gradients
-	for (i = 0; i <= from; ++i){
-		//cout << "sum node:" << i << endl;
-		if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
-			if (!(seal_is_encrypted(a[i]))){
-				if(remote){
-					assert(false);
-				}else{
-
-					int node_num = kad_len(a[i]);
-#pragma omp parallel
-{
-#pragma omp for
-					for(j = 0; j < node_num; j++){
-						int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-						if (a[i]->g_c[j].clean()) {
-							a[i]->g[j] = 0.0;
-						}else{
-							engine->decrypt(a[i]->g_c[j], plaintext[thread_mod_id]);
-							engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
-							//here is where noise should be added.
-							a[i]->g[j] = learning_rate * std::accumulate(t[thread_mod_id].begin(), t[thread_mod_id].end(), 0);		
-						}
-					}
-}
+	if(engine->remote_mode()){
+		int layers_considered = 0;
+		for (i = 0; i <= from; ++i)
+			if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0)
+				if (!(seal_is_encrypted(a[i])))
+					layers_considered++;
+		//send layer by layer
+		for (i = 0; i <= from; ++i){
+			//cout << "sum node:" << i << endl;
+			if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
+				if (!(seal_is_encrypted(a[i]))){
+					//send a series of ciphertexts
+					engine->network_io->send_ciphertext(remote_ops::OP_DP_DECRYPTION, layers_considered, a[i]->g_c, a[i]->d, a[i]->n_d);
 				}
 			}
-			else{
-
-int len_num = kad_len(a[i]);
-#pragma omp parallel
-{
-#pragma omp for
-				for(j = 0; j < len_num; j++){
-					if (a[i]->g_c[j].clean()){
-						continue;
-					}else{
-						// maybe faster on the client side to decrypt+sum+encrypte?
-						hewrapper::sum_vector(a[i]->g_c[j], learning_rate);
+		}
+		//recv layer by layer
+		for (i = 0; i <= from; ++i){
+			//cout << "sum node:" << i << endl;
+			if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
+				if (!(seal_is_encrypted(a[i]))){
+					int len = kad_len(a[i]);
+					engine->network_io->recv_data(a[i]->g, len * sizeof(float));
+					for (j = 0; j <= len; j++)
+						a[i]->g[j] *= learning_rate;
+				}else{
+					int len_num = kad_len(a[i]);
+					#pragma omp parallel
+					{
+						#pragma omp for
+						for(j = 0; j < len_num; j++){
+							if (a[i]->g_c[j].clean()){
+								continue;
+							}else{
+								// maybe faster on the client side to decrypt+sum+encrypte?
+								hewrapper::sum_vector(a[i]->g_c[j], learning_rate);
+							}
+						}
 					}
-
 				}
-}
+			}
+		}
+	}else{
+		for (i = 0; i <= from; ++i){
+			//cout << "sum node:" << i << endl;
+			if (kad_is_var(a[i]) && a[i]->g_c && a[i]->tmp > 0){
+				if (!(seal_is_encrypted(a[i]))){
+					int node_num = kad_len(a[i]);
+					#pragma omp parallel
+					{
+					#pragma omp for
+						for(j = 0; j < node_num; j++){
+							int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+							if (a[i]->g_c[j].clean()) {
+								a[i]->g[j] = 0.0;
+							}else{
+								engine->decrypt(a[i]->g_c[j], plaintext[thread_mod_id]);
+								engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
+								//here is where noise should be added.
+								a[i]->g[j] = learning_rate * std::accumulate(t[thread_mod_id].begin(), t[thread_mod_id].end(), 0.0);		
+							}
+						}
+					}		
+				}
+				else{
+					int len_num = kad_len(a[i]);
+					#pragma omp parallel
+					{
+						#pragma omp for
+						for(j = 0; j < len_num; j++){
+							if (a[i]->g_c[j].clean()){
+								continue;
+							}else{
+								// maybe faster on the client side to decrypt+sum+encrypte?
+								hewrapper::sum_vector(a[i]->g_c[j], learning_rate);
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -691,7 +727,10 @@ void kad_grad(int n, kad_node_t **a, int from, bool add_noise, double learning_r
 			if ((a[i]->g))
 				memset(a[i]->g, 0, kad_len(a[i]) * sizeof(float));
 			if ((a[i]->g_c) && !(a[i]->ext_flag & KAD_X_G_SHARED))
-            	for(j = 0; j < kad_len(a[i]); j++) a[i]->g_c[j].clean() = true;
+            	for(j = 0; j < kad_len(a[i]); j++) {
+					a[i]->g_c[j].clean() = true;
+					a[i]->g_c[j].size() = 0;
+				}
         }
     }
 	for (i = from, a[i]->g[0] = 1; i >= 0; --i){ /* backprop */
@@ -865,6 +904,7 @@ static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, SEALCiphertext *
     int i;
     SEALCiphertext s(engine);
     s.clean() = true;
+	s.size() = 0;
 #pragma omp parallel
 {
 #pragma omp for
@@ -884,6 +924,7 @@ static inline SEALCiphertext kad_sdot(int n, SEALCiphertext *x, const float *y){
     int i;
     SEALCiphertext s(engine);
     s.clean() = true;
+	s.size() = 0;
 #pragma omp parallel
 {
 #pragma omp for
@@ -939,7 +980,10 @@ static inline void kad_saxpy_inlined(int n, float a, SEALCiphertext *x, SEALCiph
 #pragma omp for
     for (i = 0; i < n; ++i){
 		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-        seal_multiply(x[i], a, ciphertext[thread_mod_id]);
+		if(abs(a - 1.0)<1e-6)
+			ciphertext[thread_mod_id] = x[i];
+		else
+			seal_multiply(x[i], a, ciphertext[thread_mod_id]);
         seal_add_inplace(y[i], ciphertext[thread_mod_id]);
     }
 }
@@ -965,7 +1009,10 @@ static inline void kad_saxpy_inlined(int n, SEALCiphertext &a, const float *x, S
 #pragma omp for
     for (i = 0; i < n; ++i){
 		int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-        seal_multiply(a, x[i], ciphertext[thread_mod_id]);
+		if(abs(x[i] - 1.0)<1e-6)
+			ciphertext[thread_mod_id] = a;
+		else
+        	seal_multiply(a, x[i], ciphertext[thread_mod_id]);
         seal_add_inplace(y[i], ciphertext[thread_mod_id]);
     }
 }
@@ -1205,8 +1252,10 @@ int kad_op_mul(kad_node_t *p, int action)
 		kad_copy_dim1(p, q[0]);
 	} else if (action == KAD_FORWARD) {
 		assert(n0 >= n1);
-        for(j = 0; j < kad_len(p); j++)
+        for(j = 0; j < kad_len(p); j++){
             p->x_c[j].clean() = true;
+			p->x_c[j].size() = 0;
+		}
         if (seal_is_encrypted(q[1]))
             for (i = 0; i < n0; i += n1) /* TODO: optimize when n1==1 */
                 kad_vec_mul_sum(n1, p->x_c + i, q[0]->x_c + i, q[1]->x_c);
@@ -1247,8 +1296,10 @@ int kad_op_cmul(kad_node_t *p, int action)
 		p->n_d = 2, p->d[0] = n_a_row, p->d[1] = n_b_row;
 	} else if (action == KAD_FORWARD) {
 		//memset(p->x, 0, n_a_row * n_b_row * sizeof(float));
-        for (j = 0; j < n_a_row * n_b_row; j++)
+        for (j = 0; j < n_a_row * n_b_row; j++){
             p->x_c[j].clean() = true;
+            p->x_c[j].size() = 0;
+		}
         if (seal_is_encrypted(q[1]))
 			kad_sgemm_simple(0, 1, n_a_row, n_b_row, n_col, q[0]->x_c, q[1]->x_c, p->x_c); /* Y = X * trans(W) */
         else
@@ -1287,8 +1338,11 @@ int kad_op_matmul(kad_node_t *p, int action) /* TODO: matmul and cmul have diffe
 		p->n_d = 2, p->d[0] = n_a_row, p->d[1] = n_b_col;
 	} else if (action == KAD_FORWARD) {
 		//memset(p->x, 0, n_a_row * n_b_col * sizeof(float));
-        for (j = 0; j < n_a_row * n_b_col; j++)
+        for (j = 0; j < n_a_row * n_b_col; j++){
+
             p->x_c[j].clean() = true;
+            p->x_c[j].size() = 0;
+		}
         if (seal_is_encrypted(q[1]))
 			kad_sgemm_simple(0, 0, n_a_row, n_b_col, n_a_col, q[0]->x_c, q[1]->x_c, p->x_c); /* Y = X * W */
         else
@@ -1352,7 +1406,7 @@ int kad_op_exp(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if(remote)
+        if(engine->remote_mode())
         {
             //not implemented
             assert(false);
@@ -1384,7 +1438,7 @@ int kad_op_log(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if(remote)
+        if(engine->remote_mode())
         {
             //not implemented
             assert(false);
@@ -1401,7 +1455,7 @@ int kad_op_log(kad_node_t *p, int action)
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
 		// input must be encrypted.
 		assert(seal_is_encrypted(q));
-		if(remote){
+		if(engine->remote_mode()){
 			//not implemented
 			assert(false);
 		}else{
@@ -1706,9 +1760,16 @@ int kad_op_mse(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
-        if (remote){
+        if (engine->remote_mode()){
             //NOT IMPLEMENTED
-            assert(false);
+            engine->decrypt(y1->x_c[0], *plaintext);
+            engine->decode(*plaintext, test_t[0]);
+            engine->decrypt(y0->x_c[0], *plaintext);
+            engine->decode(*plaintext, truth_t[0]);
+            for (i=0; i< truth_t[0].size(); i++)
+                test_t[0][i] = pow((truth_t[0][i] - test_t[0][i]), 2.0) * 1./float(y0->x_c[0].size());
+            engine->encode(test_t[0], *plaintext);
+            engine->encrypt(*plaintext, p->x_c[0]);
         }else{
             engine->decrypt(y1->x_c[0], *plaintext);
             engine->decode(*plaintext, test_t[0]);
@@ -1720,9 +1781,17 @@ int kad_op_mse(kad_node_t *p, int action)
             engine->encrypt(*plaintext, p->x_c[0]);
 		}
 	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
-        if (remote){
+        if (engine->remote_mode()){
             //NOT IMPLEMENTED
-            assert(false);
+			float coeff = 2.0f * p->g[0]/float(y0->x_c[0].size());
+            engine->decrypt(y1->x_c[0], *plaintext);
+            engine->decode(*plaintext, test_t[0]);
+            engine->decrypt(y0->x_c[0], *plaintext);
+            engine->decode(*plaintext, truth_t[0]);
+            for (i=0; i < truth_t[0].size(); i++)
+                test_t[0][i] = coeff * (test_t[0][i] - truth_t[0][i]);
+            engine->encode(test_t[0], *plaintext);
+            seal_add_inplace(y1->g_c[0], *plaintext);
         }else{
 			float coeff = 2.0f * p->g[0]/float(y0->x_c[0].size());
             engine->decrypt(y1->x_c[0], *plaintext);
@@ -1748,7 +1817,7 @@ int kad_op_ce_bin(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }else{
             engine->decrypt(y1->x_c[0], *plaintext);
@@ -1756,13 +1825,13 @@ int kad_op_ce_bin(kad_node_t *p, int action)
             engine->decrypt(y0->x_c[0], *plaintext);
             engine->decode(*plaintext, truth_t);
             for (i=0; i<truth_t.size(); i++){
-				test_t[i] = (-log(test_t[i]+1e-6)*truth_t[i] + (truth_t[i]-1)*log(1e-6 + 1.-test_t[i]))/(double)(truth_t.size());
+				test_t[i] = (-log(test_t[i]+1e-4)*truth_t[i] + (truth_t[i]-1)*log(1e-4 + 1.-test_t[i]))/(double)(truth_t.size());
 			}
             engine->encode(test_t, *plaintext);
             engine->encrypt(*plaintext, p->x_c[0]);
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(y1)) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }else{
             engine->decrypt(y1->x_c[0], *plaintext);
@@ -1770,7 +1839,7 @@ int kad_op_ce_bin(kad_node_t *p, int action)
             engine->decrypt(y0->x_c[0], *plaintext);
             engine->decode(*plaintext, truth_t);
             for (i=0; i<truth_t.size(); i++)
-                test_t[i] = p->g[0]*(-1./(test_t[i]+1e-6)*truth_t[i] + (1-truth_t[i])*1./(1.-test_t[i]+1e-6))/(float)(truth_t.size());
+                test_t[i] = p->g[0]*(-1./(test_t[i]+1e-4)*truth_t[i] + (1-truth_t[i])*1./(1.-test_t[i]+1e-4))/(float)(truth_t.size());
             engine->encode(test_t, *plaintext);
             seal_add_inplace(y1->g_c[0], *plaintext);
         }
@@ -1804,9 +1873,10 @@ int kad_op_ce_multi(kad_node_t *p, int action)
 		if (kad_len(y0) != kad_len(y1) || y0->d[y0->n_d - 1] != y1->d[y1->n_d - 1]) return -1;
 		p->n_d = 0;
 	} else if (action == KAD_FORWARD) {
-        if (remote){
-			assert(false);
-			//sendToClient(y1->x_c, n1, y0->x_c, n1, p->x_c, 1, CE_MULTI_FP);
+        if (engine->remote_mode()){
+			engine->network_io->send_ciphertext(remote_ops::OP_CE_MULTI_FP, p->layer_mark, y1->x_c, y1->d, y1->n_d);
+			engine->network_io->send_ciphertext(remote_ops::OP_CE_MULTI_FP, p->layer_mark, y0->x_c, y0->d, y0->n_d);
+			engine->network_io->recv_ciphertext(p->x_c);
         }else{
 			int batch_size = y1->x_c[0].size();
             if (c == 0) {
@@ -1817,7 +1887,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t[0]);
                     for (j=0; j<batch_size;j++)
-                        cost[j] += -log(test_t[0][j]+1e-6)*truth_t[0][j]/(float)(batch_size);
+                        cost[j] += -log(test_t[0][j]<=1e-4?1e-4:test_t[0][j])*truth_t[0][j]/(float)(batch_size);
                 }
                 engine->encode(cost, *plaintext);
                 engine->encrypt(*plaintext, p->x_c[0]);
@@ -1829,15 +1899,20 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t[0]);
                     for (j=0; j<batch_size;j++)
-                        cost[j] += -c->x[i]*log(test_t[0][j]+1e-6)*truth_t[0][j]/(float)(batch_size);
+                        cost[j] += -c->x[i]*log(test_t[0][j]<=1e-4?1e-4:test_t[0][j])*truth_t[0][j]/(float)(batch_size);
                 }
                 engine->encode(cost, *plaintext);
                 engine->encrypt(*plaintext, p->x_c[0]);
             }
         }
 	} else if (action == KAD_BACKWARD && (kad_is_back(y1))) {
-        if (remote){
-            assert(false);
+        if (engine->remote_mode()){
+			int batch_size = y1->x_c[0].size();
+			engine->encode(p->g[0] / (float)(batch_size), *plaintext);
+			engine->encrypt(*plaintext, *ciphertext);
+			int d[]{1};
+            engine->network_io->send_ciphertext(remote_ops::OP_CE_MULTI_BP, p->layer_mark, ciphertext, d, 1);
+            engine->network_io->recv_ciphertext(y1->g_c);
         }else{
 			int batch_size = y1->x_c[0].size();
             float coeff = p->g[0] / (float)(batch_size);
@@ -1848,7 +1923,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t[0]);
                     for (j = 0; j < batch_size; j++)
-                        test_t[0][j] = -coeff * truth_t[0][j] * 1.0 / (test_t[0][j]+1e-6);
+                        test_t[0][j] = -coeff * truth_t[0][j] * 1.0 / (test_t[0][j]<=1e-4?1e-4:test_t[0][j]);
                     engine->encode(test_t[0], *plaintext);
                     seal_add_inplace(y1->g_c[i], *plaintext);
                 }
@@ -1859,7 +1934,7 @@ int kad_op_ce_multi(kad_node_t *p, int action)
                     engine->decrypt(y0->x_c[i], *plaintext);
                     engine->decode(*plaintext, truth_t[0]);
                     for (j=0; j<batch_size; j++)
-                        test_t[0][j] = -coeff * c->x[i] * truth_t[0][j] * 1.0 / (test_t[0][j]+1e-6);
+                        test_t[0][j] = -coeff * c->x[i] * truth_t[0][j] * 1.0 / (test_t[0][j]<=1e-4?1e-4:test_t[0][j]);
                     engine->encode(test_t[0], *plaintext);
                 	seal_add_inplace(y1->g_c[i], *plaintext);
                 }
@@ -1922,7 +1997,7 @@ int kad_op_sigm(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }else{
 
@@ -1941,7 +2016,7 @@ int kad_op_sigm(kad_node_t *p, int action)
 }
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }
         else{
@@ -1952,6 +2027,7 @@ int kad_op_sigm(kad_node_t *p, int action)
 				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
 				if(p->g_c[i].clean()){
 					q->g_c[i].clean() = true;
+					q->g_c[i].size() = p->g_c[i].size();
 				}else{
 					engine->decrypt(p->x_c[i], plaintext[thread_mod_id]);
 					engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
@@ -1977,7 +2053,7 @@ int kad_op_tanh(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }else{
             for (i = 0; i < n; i++){
@@ -1996,7 +2072,7 @@ int kad_op_tanh(kad_node_t *p, int action)
             }
 		}
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }
         else{
@@ -2028,8 +2104,9 @@ int kad_op_relu(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if (remote){
-            assert(false);
+        if (engine->remote_mode()){
+			engine->network_io->send_ciphertext(remote_ops::OP_RELU_FP, p->layer_mark, q->x_c, q->d, q->n_d);
+			engine->network_io->recv_ciphertext(p->x_c);
         }else{
 #pragma omp parallel
 {
@@ -2053,8 +2130,9 @@ int kad_op_relu(kad_node_t *p, int action)
 }
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-        if (remote){
-            assert(false);
+        if (engine->remote_mode()){
+			engine->network_io->send_ciphertext(remote_ops::OP_RELU_BP, p->layer_mark, p->g_c, p->d, p->n_d);
+			engine->network_io->recv_ciphertext(q->g_c);
         }
         else{
 #pragma omp parallel
@@ -2064,13 +2142,14 @@ int kad_op_relu(kad_node_t *p, int action)
 				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
 				if(p->g_c[i].clean()){
 					q->g_c[i].clean() = true;
+					q->g_c[i].size() = p->g_c[i].size();
 				}else{
 					engine->decrypt(p->x_c[i], plaintext[thread_mod_id]);
 					engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
 					engine->decrypt(p->g_c[i], plaintext[thread_mod_id]);
 					engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
 					for (j = 0; j < t[thread_mod_id].size(); ++j)
-						test_t[thread_mod_id][j] = test_t[thread_mod_id][j] > 0.0f + 1e-6? t[thread_mod_id][j] : 0.0f;
+						test_t[thread_mod_id][j] = test_t[thread_mod_id][j] > 0.0f + 1e-4? t[thread_mod_id][j] : 0.0f;
 					engine->encode(test_t[thread_mod_id], plaintext[thread_mod_id]);
 					engine->encrypt(plaintext[thread_mod_id], ciphertext[thread_mod_id]);
 					seal_add_inplace(q->g_c[i], ciphertext[thread_mod_id]);					
@@ -2092,7 +2171,7 @@ int kad_op_sin(kad_node_t *p, int action)
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }else{
             for (i = 0; i < n; i++){
@@ -2105,7 +2184,7 @@ int kad_op_sin(kad_node_t *p, int action)
             }
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-        if (remote){
+        if (engine->remote_mode()){
             assert(false);
         }
         else{
@@ -2134,15 +2213,16 @@ int kad_op_softmax(kad_node_t *p, int action)
 	int i, j, n1, d0;
 	kad_node_t *q = p->child[0];
 	float s;
-	int batch_size = q->x_c[0].size();
 
 	n1 = q->d[q->n_d - 1];
 	//d0 = kad_len(q) / n1;
 	if (action == KAD_SYNC_DIM) {
 		kad_copy_dim1(p, q);
 	} else if (action == KAD_FORWARD) {
-        if (remote){
-            assert(false);
+		int batch_size = q->x_c[0].size();
+        if (engine->remote_mode()){            
+			engine->network_io->send_ciphertext(remote_ops::OP_SOFTMAX_FP, p->layer_mark, q->x_c, q->d, q->n_d);
+            engine->network_io->recv_ciphertext(p->x_c);
         }else{
             vector<vector<double>> raw_value(n1, vector<double>(batch_size, 0.));
             vector<double> &y = test_t[0];
@@ -2171,8 +2251,10 @@ int kad_op_softmax(kad_node_t *p, int action)
             }
         }
 	} else if (action == KAD_BACKWARD && kad_is_back(q)) {
-        if (remote){
-            assert(false);
+		int batch_size = q->x_c[0].size();
+        if (engine->remote_mode()){
+			engine->network_io->send_ciphertext(remote_ops::OP_SOFTMAX_BP, p->layer_mark, p->g_c, p->d, p->n_d);
+            engine->network_io->recv_ciphertext(q->g_c);
         }else{
             vector<vector<double>> raw_value(n1, vector<double>(batch_size, 0.));
             vector<vector<double>> raw_gradient(n1, vector<double>(batch_size, 0.));
@@ -2361,8 +2443,7 @@ static void conv_rot180(int d0, int d1, SEALCiphertext *x) /* rotate/reverse a w
 	if (_stride > 1) { \
 		for (l = 0; l < _wn; ++l) { \
 			SEALCiphertext *xl = &_xx[l - _pad]; \
-            for (k = 0; k < _pn; k++) \
-                _t[k].clean() = true; \
+            for (k = 0; k < _pn; k++){_t[k].clean() = true;_t[k].size()=0;} \
 			kad_saxpy(_pn, _ww[l], _yy, _t); \
 			for (j = 0; j < _pn; ++j, xl += _stride) seal_add_inplace(*xl, _t[j]); \
 		} \
@@ -2396,18 +2477,18 @@ static void conv_rot180(int d0, int d1, SEALCiphertext *x) /* rotate/reverse a w
 int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-width (CHW) shape */
 {
 #define conv2d_loop1(_x, _w, _y, _tmp, _row_func) do { /* for the CHW shape */ \
-		int n, c1, c0, i, k, ii, j; \
+		int c1, c0, i, k, ii, j; \
         for (c1 = 0; c1 < w->d[0]; ++c1) /* output channel */ \
             for (c0 = 0; c0 < w->d[1]; ++c0) /* input channel */ \
                 for (k = 0; k < w->d[2]; ++k) { /* kernel row */ \
                     auto _ww = &(_w)[((c1 * w->d[1] + c0) * w->d[2] + k) * w->d[3]]; \
                     for (i = 0, ii = k - aux[0].pad[0]; i < p->d[1] && ii >= 0 && ii < q->d[1]; ++i, ii += aux[0].stride) { /* output row */ \
-                        SEALCiphertext * _xx = &(_x)[((n * q->d[0] + c0) * q->d[1] + ii) * q->d[2]]; \
-                        SEALCiphertext * _yy = &(_y)[((n * p->d[0] + c1) * p->d[1] + i)  * p->d[2]]; \
+                        SEALCiphertext * _xx = &(_x)[(c0 * q->d[1] + ii) * q->d[2]]; \
+                        SEALCiphertext * _yy = &(_y)[(c1 * p->d[1] + i)  * p->d[2]]; \
                         if (x_padded) { \
 							for (j = 0; j < q->d[2]; j ++) \
 								x_padded[aux[1].pad[0] + j] = _xx[j]; \
-                            _xx = x_padded + aux[1].pad[0]; \
+							_xx = x_padded + aux[1].pad[0]; \
                         } \
 						_row_func(_xx, _ww, _yy, w->d[3], p->d[2], aux[1].stride, aux[1].pad[0], (_tmp)); \
                     } /* ~i */ \
@@ -2426,6 +2507,7 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
 			for (i = 0 ; i < q->d[2] + aux[1].pad[0] + aux[1].pad[1]; i ++){
 				x_padded[i].init(engine);
 				x_padded[i].clean() = true;
+				x_padded[i].size() = 0;
 			}
 		}
 	}
@@ -2437,14 +2519,18 @@ int kad_op_conv2d(kad_node_t *p, int action) /* in the number-channel-height-wid
 	} else if (action == KAD_FORWARD) {
         if(seal_is_encrypted(w)){
 		    //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
-            for (l = 0; l < kad_len(p); l++)
+            for (l = 0; l < kad_len(p); l++){
                 p->x_c[l].clean() = true;
+                p->x_c[l].size() = 0;
+			}
             conv2d_loop1(q->x_c, w->x_c, p->x_c, t1, process_row_for);
             //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x_c);
         }else{
 		    //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
-            for (l = 0; l < kad_len(p); l++)
+            for (l = 0; l < kad_len(p); l++){
                 p->x_c[l].clean() = true;
+                p->x_c[l].size() = 0;
+			}
             conv2d_loop1(q->x_c, w->x, p->x_c, t1, process_row_for);
             //conv_rot180(w->d[0] * w->d[1], w->d[2] * w->d[3], w->x);
 		}
@@ -2487,112 +2573,130 @@ int kad_op_max2d(kad_node_t *p, int action)
 		p->n_d = 3;
 		p->d[0] = q->d[0], p->d[1] = conv_out_size(q->d[1], &aux[0]), p->d[2] = conv_out_size(q->d[2], &aux[1]);
 	} else if (action == KAD_ALLOC) {
-		p->gtmp = realloc(p->gtmp, kad_len(p) * sizeof(int));
+		p->gtmp = realloc(p->gtmp, engine->max_slot() * kad_len(p) * sizeof(int));
 	} else if (action == KAD_FORWARD) {
 		int batch_size = q->x_c[0].size();
-        if (remote){
-            assert(false);
+        if (engine->remote_mode()){
+			engine->network_io->send_ciphertext(remote_ops::OP_MAX2D_FP, p->layer_mark, q->x_c, q->d, q->n_d);
+            engine->network_io->send_data(aux, 2*sizeof(conv_conf_t));
+			int return_size = engine->network_io->recv_ciphertext(p->x_c);
+
         }else{
             int rest = 1, len, i;
             int *f = (int*)p->gtmp;
             len = kad_len(p);
-            for (i = 0; i < len; ++i) p->x_c[i].clean() = true;
+            for (i = 0; i < len; ++i){
+				p->x_c[i].clean() = true;
+				p->x_c[i].size() = 0;
+			}
             for (i = 0; i < p->n_d - 2; ++i) rest *= p->d[i];
 			int p_row = p->d[p->n_d - 2], p_col = p->d[p->n_d - 1];
 			int full_ii = rest * p_row * p_col;
-#pragma omp parallel
-{
-#pragma omp for
-			for (int ii = 0; ii < full_ii; ii++){
-				int t = ii / (p_row * p_col);
-				int i = (ii / p_col) % (p_row);
-				int j = (ii % p_col);
-				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-				//for (t = 0; t < rest; ++t) {
-				//	for (i = 0; i < p_row; ++i){
-				//		for (j = 0; j < p_col; ++j){
-							truth_t[thread_mod_id].resize(batch_size);
-							for (int k = 0; k < batch_size; k++)
-								truth_t[thread_mod_id][k] =  -FLT_MAX;
-							int out_po = ii;
-							int kernel_height = aux[0].kernel_size;
-							int kelnel_width = aux[1].kernel_size;
-							for (int k = 0; k < kernel_height; ++k){
-								for (int l = 0; l < kelnel_width; ++l){
-									//iii: current row 
-									int iii = i * aux[0].stride + k - aux[0].pad[0];
-									if (iii < 0 || iii >= q->d[p->n_d-2]) continue;
-									//v0: starting index in the current row
-									//v_end: ending index in the current row
-									//in_po: current input index
-									//out_po: current output index
-									//max: current max batch
-									//f: current used input index
-									int v0 = (t * q->d[p->n_d - 2] + iii) * q->d[p->n_d - 1];
-									int v_end = v0 + q->d[p->n_d - 1];
-									int in_po = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0) + aux[1].stride * j;
-									if (in_po >= v_end) continue;
-									engine->decrypt(q->x_c[in_po], plaintext[thread_mod_id]);
-									engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
-									for (int m = 0; m < batch_size; m++)
-										if ( test_t[thread_mod_id][m] > truth_t[thread_mod_id][m])
-											truth_t[thread_mod_id][m] = test_t[thread_mod_id][m], f[out_po] = in_po;
-								}
-							}
-							engine->encode(truth_t[thread_mod_id], plaintext[thread_mod_id]);
-							engine->encrypt(plaintext[thread_mod_id], p->x_c[out_po]); 
-				//		}
-				//	}
-				//}
-				
+			#pragma omp parallel
+			{
+				#pragma omp for
+				for (int ii = 0; ii < full_ii; ii++){
+					int t = ii / (p_row * p_col);
+					int i = (ii / p_col) % (p_row);
+					int j = (ii % p_col);
+					int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
+					truth_t[thread_mod_id].resize(batch_size);
+					for (int k = 0; k < batch_size; k++)
+						truth_t[thread_mod_id][k] =  -FLT_MAX;
+					int out_po = ii;
+					int kernel_height = aux[0].kernel_size;
+					int kelnel_width = aux[1].kernel_size;
+					for (int k = 0; k < kernel_height; ++k){
+						for (int l = 0; l < kelnel_width; ++l){
+							//iii: current row 
+							int iii = i * aux[0].stride + k - aux[0].pad[0];
+							if (iii < 0 || iii >= q->d[p->n_d-2]) continue;
+							//v0: starting index in the current row
+							//v_end: ending index in the current row
+							//in_po: current input index
+							//out_po: current output index
+							//max: current max batch
+							//f: current used input index
+							int v0 = (t * q->d[p->n_d - 2] + iii) * q->d[p->n_d - 1];
+							int v_end = v0 + q->d[p->n_d - 1];
+							int in_po = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0) + aux[1].stride * j;
+							if (in_po >= v_end) continue;
+							engine->decrypt(q->x_c[in_po], plaintext[thread_mod_id]);
+							engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
+							for (int m = 0; m < batch_size; m++)
+								if ( test_t[thread_mod_id][m] > truth_t[thread_mod_id][m])
+									truth_t[thread_mod_id][m] = test_t[thread_mod_id][m], f[out_po*batch_size+m] = in_po;
+						}
+					}
+					engine->encode(truth_t[thread_mod_id], plaintext[thread_mod_id]);
+					engine->encrypt(plaintext[thread_mod_id], p->x_c[out_po]); 
+					
+				}
 			}
-}
         }
 	} else if (action == KAD_BACKWARD) {
-        if (remote){
-            assert(false);
+		int batch_size = q->x_c[0].size();
+        if (engine->remote_mode()){
+			engine->network_io->send_ciphertext(remote_ops::OP_MAX2D_BP, p->layer_mark, p->g_c, p->d, p->n_d);
+            engine->network_io->send_data(aux, 2*sizeof(conv_conf_t));
+			engine->network_io->recv_ciphertext(q->g_c);
         }
         else{
-		//do something like decrypt/encrypt
+            assert((aux[0].pad[0] == 0 && aux[0].pad[1] == 0 && aux[1].pad[0] == 0 && aux[1].pad[1] == 0));
+			assert(aux[0].stride==aux[0].kernel_size && aux[1].stride==aux[1].kernel_size);
+            int *f = (int*)p->gtmp; //in engine->remote_mode() this should be encrypted.
+			int rest = 1, i;
+			int in_len = kad_len(q);
+			int out_len = kad_len(p);
+			for (i = 0; i < p->n_d - 2; ++i) rest *= p->d[i];
+			int p_row = p->d[p->n_d - 2], p_col = p->d[p->n_d - 1];
+			assert(out_len == rest * p_row * p_col);
+			#pragma omp parallel
+			{
+			#pragma omp for
+				for (int ii = 0; ii < out_len; ii++){
+					int t = ii / (p_row * p_col);
+					int i = (ii / p_col) % (p_row);
+					int j = (ii % p_col);
+					int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
 
-		int in_len = kad_len(q);
-		int out_len = kad_len(p);
-		int *f = (int*)p->gtmp; //in remote this should be encrypted.
-#pragma omp parallel
-{
-#pragma omp for
-            for (int i=0; i< out_len; i++){
-				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-				engine->decrypt(p->g_c[i], plaintext[thread_mod_id]);
-				engine->decode(plaintext[thread_mod_id], t[thread_mod_id]);
-            }
-}
-				// do nothing.				
-#pragma omp parallel
-{
-#pragma omp for
-            for (int i=0; i< in_len; i++){
-				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-				engine->encode(t[thread_mod_id], plaintext[thread_mod_id]);
-				engine->encrypt(plaintext[thread_mod_id], ciphertext[thread_mod_id]);
-				for (int j = 0; j < out_len; ++j){
-					if(f[j] == i)seal_add_inplace(q->g_c[i],p->g_c[j]);
-				}				
-            }
-}
+					truth_t[thread_mod_id].resize(batch_size);
+					test_t[thread_mod_id].resize(batch_size);
+					std::vector<double> & out_gradient = truth_t[thread_mod_id];
+					std::vector<double> & in_gradient = test_t[thread_mod_id];
 
-// a makeshift to work around the data race on the input pixel.
-#pragma omp parallel
-{
-#pragma omp for
-			for (int i = 0; i < in_len; ++i){
-				int thread_mod_id = omp_get_thread_num()%omp_get_max_threads();
-				
-										//engine->decrypt(q->x_c[in_po], plaintext[thread_mod_id]);
-										//engine->decode(plaintext[thread_mod_id], test_t[thread_mod_id]);
-
-			}
-}
+					int out_po = ii;
+					int kernel_height = aux[0].kernel_size;
+					int kelnel_width = aux[1].kernel_size;
+					engine->decrypt(p->g_c[out_po], plaintext[thread_mod_id]);
+					engine->decode(plaintext[thread_mod_id], out_gradient);
+					for (int k = 0; k < kernel_height; ++k){
+						for (int l = 0; l < kelnel_width; ++l){
+							//iii: current row 
+							int iii = i * aux[0].stride + k - aux[0].pad[0];
+							if (iii < 0 || iii >= q->d[p->n_d-2]) continue;
+							//v0: starting index in the current row
+							//v_end: ending index in the current row
+							//in_po: current input index
+							//out_po: current output index
+							//max: current max batch
+							//f: current used input index
+							int v0 = (t * q->d[p->n_d - 2] + iii) * q->d[p->n_d - 1];
+							int v_end = v0 + q->d[p->n_d - 1];
+							int in_po = v0 + (l > aux[1].pad[0]? l - aux[1].pad[0] : 0) + aux[1].stride * j;
+							if (in_po >= v_end) continue;
+							// construct the gradient on the in_po position
+							for (int m = 0; m < batch_size; m++)
+								if ( f[out_po * batch_size + m] == in_po )
+									in_gradient[m] = out_gradient[m];
+								else
+									in_gradient[m] = 0;
+							engine->encode(in_gradient, plaintext[thread_mod_id]);
+							engine->encrypt(plaintext[thread_mod_id], q->g_c[in_po]); 
+						}
+					}
+				}
+			}		
 		}
 	}
 	return 0;
@@ -2954,7 +3058,8 @@ void accumulate_times_layer(int n, kad_node_t ** a, int from, int repeat, vector
 	recorded_layers.reserve(n);
 	forward_times.reserve(n);
 	backward_times.reserve(n);
-	other_times = vector<int>(2,0);
+	other_times.push_back(0.);
+	other_times.push_back(0.);
 	//forwarding 
 	if(!seal_is_encrypted(a[from])){
 		throw invalid_argument("Only evaluate ciphertext for now.");
@@ -2985,7 +3090,10 @@ void accumulate_times_layer(int n, kad_node_t ** a, int from, int repeat, vector
 				if ((a[j]->g))
 					memset(a[j]->g, 0, kad_len(a[j]) * sizeof(float));
 				if ((a[j]->g_c) && !(a[j]->ext_flag & KAD_X_G_SHARED))
-					for(k = 0; k < kad_len(a[j]); k++) a[j]->g_c[k].clean() = true;
+					for(k = 0; k < kad_len(a[j]); k++) {
+						a[j]->g_c[k].clean() = true;
+						a[j]->g_c[k].size() = 0;
+					}
 			}
 		}
 		for (j = from, a[j]->g[0] = 1; j >= 0; --j){ /* backprop */
@@ -3023,6 +3131,7 @@ void accumulate_times_layer(int n, kad_node_t ** a, int from, int repeat, vector
 		}
 		end = std::chrono::steady_clock::now();
 		interval = (std::chrono::duration_cast<std::chrono::milliseconds>(end - start)).count();
+		//cout << "updated: " << interval << endl;
 		if(i>0)
 			other_times[1] += interval;
 	}

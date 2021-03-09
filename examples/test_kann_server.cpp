@@ -2,11 +2,10 @@
 #include <cmath>
 #include <iostream>
 #include <omp.h>
+#include "NetIO.h"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
 #include "util.h"
-#include "boost/asio.hpp"
-#include "tcp/NetIO.hpp"
 
 using namespace std;
 
@@ -171,33 +170,241 @@ int main(int argc, char *argv[])
 
     cout << "save encrypted ciphertext in " << base_dir << endl;
 
-    //=======
-    int op;
-    vector<double> tmp1{-1,1,-2,2,-3,3};
-    vector<double> tmp2{0.01, -0.02, 0.03, -0.04, 0.05, -0.06};
-    vector<double> tmp3{0,100,-100,1000,-1000};
-    SEALCiphertext small_ciphertext[3];
-    engine->encode(tmp1, *plaintext);
-    engine->encrypt(*plaintext, small_ciphertext[0]);
-    engine->encode(tmp2, *plaintext);
-    engine->encrypt(*plaintext, small_ciphertext[1]);
-    engine->encode(tmp3, *plaintext);
-    engine->encrypt(*plaintext, small_ciphertext[2]);
-    int dim[] = {1,3};
-    int dim_size = 2;
     cout << "wait for someone to connect." << endl;
     NetIO network_io(nullptr, 17722, engine);
     cout << "connected" << endl;
+    int layer = 0;
+    int ciphertext_num, gradient_num, recv_num;
+    SEALCiphertext small_ciphertext[100];
+    SEALCiphertext small_ciphertext2[100];
+    float returned_noisy[100];
+    int small_batch_size;
+    int dim[5];
+    int dim_size;
+    vector<vector<double>> raw_values;
+    vector<vector<double>> raw_labels;
+    vector<vector<double>> raw_gradients;
+    //=======
+    //TEST RELU
+    ciphertext_num=4;
+    small_batch_size = 2;
+    dim[0] = ciphertext_num;
+    dim_size = 1;
+    raw_values.clear();
+    raw_values.push_back(vector<double>{-1,2});
+    raw_values.push_back(vector<double>{2,-1});
+    raw_values.push_back(vector<double>{-1,-1});
+    raw_values.push_back(vector<double>{2,2});
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_values[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
 
-    network_io.send_ciphertext(remote_ops::OP_RELU_FP, small_ciphertext, 3, dim, dim_size);
-    network_io.recv_ciphertext(&op, small_ciphertext, dim, &dim_size);
-    for(int i=0;i<3;i++)
+    network_io.send_ciphertext(remote_ops::OP_RELU_FP, layer, small_ciphertext, dim, dim_size);
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "RELU FP Result:" << endl;
+    for(int i=0;i<recv_num;i++)
         print_ciphertext(&small_ciphertext[i]);
-        /**
-    cout << "dim_size:" << dim_size << endl;
-    for(int i=0;i<3;i++)
-        cout << "dim" << i << ":" << dim[i];
-    cout << endl;**/
+
+    gradient_num = ciphertext_num;
+    raw_gradients.clear();
+    raw_gradients.push_back(vector<double>{1,4});
+    raw_gradients.push_back(vector<double>{2,3});
+    raw_gradients.push_back(vector<double>{3,2});
+    raw_gradients.push_back(vector<double>{4,1});
+    for( int i = 0; i< gradient_num;i++){
+        engine->encode(raw_gradients[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    network_io.send_ciphertext(remote_ops::OP_RELU_BP, layer, small_ciphertext, dim, dim_size);
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "RELU BP Result:" << endl;
+    for(int i=0;i<recv_num;i++)
+        print_ciphertext(&small_ciphertext[i]);
+
+    layer++;
+    //===
+    //TEST CE_MULTI
+    ciphertext_num=4;
+    small_batch_size = 2;
+    dim[0] = ciphertext_num;
+    dim_size = 1;
+    raw_values.clear();
+    raw_labels.clear();
+    raw_values.push_back(vector<double>{0.5, 0.1});
+    raw_values.push_back(vector<double>{0, 0.2});
+    raw_values.push_back(vector<double>{0.5, 0.3});
+    raw_values.push_back(vector<double>{0, 0.4});
+    raw_labels.push_back(vector<double>{0,0});
+    raw_labels.push_back(vector<double>{0,0});
+    raw_labels.push_back(vector<double>{1,0});
+    raw_labels.push_back(vector<double>{0,1});
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_values[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_labels[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext2[i]);
+    }
+
+    network_io.send_ciphertext(remote_ops::OP_CE_MULTI_FP, layer, small_ciphertext, dim, dim_size);
+    network_io.send_ciphertext(remote_ops::OP_CE_MULTI_FP, layer, small_ciphertext2, dim, dim_size);
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    assert(recv_num == 1);
+    cout << "OP_CE_MULTI_FP:" << endl;\
+        print_ciphertext(&small_ciphertext[0]);
+
+    
+    gradient_num = 1;
+    raw_gradients.clear();
+    raw_gradients.push_back(vector<double>{1,1});
+    for( int i = 0; i< gradient_num;i++){
+        engine->encode(raw_gradients[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    dim[0] = 1;
+    network_io.send_ciphertext(remote_ops::OP_CE_MULTI_BP, layer, small_ciphertext, dim, 1);
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "OP_CE_MULTI_BP:" << endl;
+    for(int i=0;i<recv_num;i++)
+        print_ciphertext(&small_ciphertext[i]);
+
+    layer++;
+    //===
+    //TEST MAX2D
+
+    ciphertext_num=16;
+    small_batch_size = 2;
+    dim[0] = 1; dim[1] = 4; dim[2] = 4;
+    dim_size = 3;
+    raw_values.clear();
+    raw_values.push_back(vector<double>{1,1});
+    raw_values.push_back(vector<double>{2,4});
+    raw_values.push_back(vector<double>{6,9});
+    raw_values.push_back(vector<double>{5,5});
+    raw_values.push_back(vector<double>{3,3});
+    raw_values.push_back(vector<double>{4,2});
+    raw_values.push_back(vector<double>{8,7});
+    raw_values.push_back(vector<double>{7,6});
+    raw_values.push_back(vector<double>{4,1});
+    raw_values.push_back(vector<double>{2,4});
+    raw_values.push_back(vector<double>{7,7});
+    raw_values.push_back(vector<double>{6,9});
+    raw_values.push_back(vector<double>{3,3});
+    raw_values.push_back(vector<double>{1,2});
+    raw_values.push_back(vector<double>{5,6});
+    raw_values.push_back(vector<double>{8,5});
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_values[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+
+    network_io.send_ciphertext(remote_ops::OP_MAX2D_FP, layer, small_ciphertext, dim, dim_size);
+
+	conv_conf_t *aux = new conv_conf_t[2]; 
+    aux[0].pad[0]=0;aux[0].pad[1]=0;aux[1].pad[0]=0;aux[1].pad[1]=0;
+    aux[0].kernel_size=2;aux[1].kernel_size=2;
+    aux[0].stride=2;aux[1].stride=2;
+    network_io.send_data(aux, 2*sizeof(conv_conf_t));
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "MAX2D FP Result:" << recv_num << endl;
+    for(int i=0;i<recv_num;i++)
+        print_ciphertext(&small_ciphertext[i]);
+
+    
+    gradient_num = 4;
+    dim[0] = 1;dim[1] = 2;dim[2] = 2;
+    dim_size = 3;
+    raw_gradients.clear();
+    raw_gradients.push_back(vector<double>{1,4});
+    raw_gradients.push_back(vector<double>{2,3});
+    raw_gradients.push_back(vector<double>{3,2});
+    raw_gradients.push_back(vector<double>{4,1});
+    for( int i = 0; i< gradient_num;i++){
+        engine->encode(raw_gradients[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    network_io.send_ciphertext(remote_ops::OP_MAX2D_BP, layer, small_ciphertext, dim, dim_size);
+    network_io.send_data(aux, 2*sizeof(conv_conf_t));
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "MAX2D BP Result:" << endl;
+    for(int i=0; i < recv_num; i++)
+        print_ciphertext(&small_ciphertext[i]);
+    delete []aux;
+
+    layer++;
+    //===
+    //TEST SOFTMAX
+    ciphertext_num=4;
+    small_batch_size = 2;
+    dim[0] = ciphertext_num;
+    dim_size = 1;
+    raw_values.clear();
+    raw_values.push_back(vector<double>{log(1),log(4)});
+    raw_values.push_back(vector<double>{log(2),log(3)});
+    raw_values.push_back(vector<double>{log(3),log(2)});
+    raw_values.push_back(vector<double>{log(4),log(1)});
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_values[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+
+    network_io.send_ciphertext(remote_ops::OP_SOFTMAX_FP, layer, small_ciphertext, dim, dim_size);
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "SOFTMAX FP Result:" << endl;
+    for(int i=0;i<recv_num;i++)
+        print_ciphertext(&small_ciphertext[i]);
+
+    gradient_num = ciphertext_num;
+    raw_gradients.clear();
+    raw_gradients.push_back(vector<double>{1,1});
+    raw_gradients.push_back(vector<double>{2,2});
+    raw_gradients.push_back(vector<double>{3,3});
+    raw_gradients.push_back(vector<double>{4,4});
+    for( int i = 0; i< gradient_num;i++){
+        engine->encode(raw_gradients[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    network_io.send_ciphertext(remote_ops::OP_SOFTMAX_BP, layer, small_ciphertext, dim, dim_size);
+    recv_num = network_io.recv_ciphertext(small_ciphertext);
+    cout << "SOFTMAX BP Result:" << endl;
+    for(int i=0;i<recv_num;i++)
+        print_ciphertext(&small_ciphertext[i]);
+
+    layer++;
+    //===
+    //TEST DP_DECRYPTION
+
+    ciphertext_num=2;
+    small_batch_size = 2;
+    dim[0] = ciphertext_num;
+    dim_size = 1;
+    raw_values.clear();
+    raw_values.push_back(vector<double>{1,0.2});
+    raw_values.push_back(vector<double>{2,0.1});
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_values[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    network_io.send_ciphertext(remote_ops::OP_DP_DECRYPTION, 2, small_ciphertext, dim, dim_size);
+
+    raw_values.clear();
+    raw_values.push_back(vector<double>{3,0.3});
+    raw_values.push_back(vector<double>{4,0.1});
+    for( int i = 0; i< ciphertext_num;i++){
+        engine->encode(raw_values[i], *plaintext);
+        engine->encrypt(*plaintext, small_ciphertext[i]);
+    }
+    network_io.send_ciphertext(remote_ops::OP_DP_DECRYPTION, 2, small_ciphertext, dim, dim_size);
+    
+    cout << "DP DECRYPTION Result:" << endl;
+    for(int i = 0; i < 2; i++){
+        network_io.recv_data(returned_noisy, 2*sizeof(float));
+        for(int j=0; j < 2; j++)
+            cout << returned_noisy[j] << " ";
+        cout <<endl;
+    }
 
     delete[] plaintext;
 	delete[] ciphertext;
@@ -215,3 +422,5 @@ free_data:
     kann_data_free(label);
     return 0;
 }
+
+

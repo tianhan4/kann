@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include "NetIO.h"
 #include "kann_extra/kann_data.h"
 #include "kann.h"
 

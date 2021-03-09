@@ -1,3 +1,4 @@
+#pragma once
 /*
   The MIT License
 
@@ -105,6 +106,10 @@ extern vector<double> *truth_t;
 extern int test_bandwidth_download; //MBit/s
 extern int test_bandwidth_upload; //MBit/s
 
+typedef struct {
+	int kernel_size, stride, pad[2];
+} conv_conf_t;
+
 typedef struct branch_wave_t{
     uint8_t wave_id; //identify wave for each branch.
     SEALCiphertext *current_peak;
@@ -125,6 +130,7 @@ typedef struct kad_node_t {
 	int32_t     tmp;            /* temporary field; MUST BE zero before calling kad_compile() */
 	int32_t     ptr_size;       /* size of ptr below */
 	int32_t     d[KAD_MAX_DIM]; /* dimensions */
+    uint16_t    layer_mark;     /* unique id for the node in a model, generally the layer id.*/
 	int32_t     ext_label;      /* labels for external uses (not modified by the kad_* APIs) */
 	uint32_t    ext_flag;       /* flags for external uses (not modified by the kad_* APIs) */
 	float      *x;              /* value; allocated for internal nodes */

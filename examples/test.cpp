@@ -1,15 +1,25 @@
+/**
+ * Tesing the basic FP/BP procedure.
+ * + Also test the remote mode. 2021/2/26
+ * And the 
+ * 
+ **/
+
 
 #include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <omp.h>
+#include <cfloat>
 #include <unistd.h>
 #include <cassert>
 #include <cstdio>
 #include <chrono>
 #include <iomanip>
-#include <iostream>
-#include "util.h"
+#include "NetIO.h"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
-#include "omp.h"
+#include "util.h"
 
 using namespace std;
 
@@ -20,7 +30,7 @@ static kann_t *model_gen(int n_in, int n_out, int loss_type, int n_h_layers, int
 	kad_node_t *t;
 	t = kann_layer_input(n_in);
 	for (i = 0; i < n_h_layers; ++i)
-		t = kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted));
+		t = kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted, b_is_encrypted));
 		//t = kann_layer_dropout(kad_relu(kann_layer_dense(t, n_h_neurons, w_is_encrypted, b_is_encrypted)), h_dropout);
 		 //better put the last layer all encrypted. For we can infer the i-1 activations from the gradients of w, due to the situation where only 1 node output.
 	return kann_new(kann_layer_cost(t, n_out, loss_type, true, true), 0);
@@ -85,13 +95,21 @@ int main(int argc, char *argv[])
 	// the encryption environment
     cout << "set up the encryption engine" << endl;
     size_t poly_modulus_degree = 8192;
-	size_t standard_scale = 40;
-    std::vector<int> coeff_modulus = {60, 40, 40, 60};
+	size_t standard_scale = 24;
+    std::vector<int> coeff_modulus = {30, 24, 24, 24, 30};
     SEALEncryptionParameters parms(poly_modulus_degree,
                     coeff_modulus,
                     seal_scheme::CKKS);
     engine = make_shared<SEALEngine>();
-    engine->init(parms, standard_scale, false);
+
+    string base_dir = "/data/glusterfs/home/htianab/kann-data/batch_" + to_string(mini_size);
+	string engine_path = base_dir + "/" + ENGINE_FILE;
+
+	if (load_engine(engine, engine_path) < 0) {
+        cout << "laod engine fail in " << engine_path << endl;
+        cout << "init engine from parms" << endl;
+        engine->init(parms, standard_scale);
+    }
 	engine->max_slot() = mini_size;
     size_t slot_count = engine->slot_count();
     cout <<"Poly modulus degree: " << poly_modulus_degree<< endl;
@@ -122,10 +140,19 @@ int main(int argc, char *argv[])
 	for (i = 0; i < max_parallel; i ++){
 		truth_t->resize(engine->max_slot());
 	}
-	//engine->zero = new SEALCiphertext(engine);
-	//engine->encode(0, *plaintext);
-	//engine->encrypt(*plaintext, *(engine->zero));
-	engine->lazy_mode() = z;
+	engine->zero = new SEALCiphertext(engine);
+	engine->encode(0, *plaintext);
+	engine->encrypt(*plaintext, *(engine->zero));
+    //engine->zero = nullptr;
+    engine->lazy_relinearization() = true;
+    engine->lazy_mode() = true;    
+	{//about the remote part.
+		//2. create network io
+		//engine->createNetworkIO(nullptr, 17722);
+		//3. remote mode
+		engine->remote_mode()=false;
+	}
+
 	//1. read the model and data
 	kann_srand(seed);
 	in = kann_data_read(argv[optind]);
@@ -344,13 +371,13 @@ int main(int argc, char *argv[])
 	kad_node_t *cnn_t;
 	kann_t *cnn_ann;
 	cnn_t = kad_feed(3, 1, 5, 5), cnn_t->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-	cnn_t = kann_layer_conv2d(cnn_t, 1, 3, 3, 1, 1, 0, 0);
+	cnn_t = kann_layer_conv2d(cnn_t, 1, 2, 2, 1, 1, 0, 0);
 
-	cnn_t = kad_max2d(cnn_t, 2, 2, 1, 1, 0, 0); // 2x2 kernel; 1*1 stride; 0x0 padding
+	cnn_t = kad_max2d(cnn_t, 2, 2, 2, 2, 0, 0); // 2x2 kernel; 2*2 stride; 0x0 padding
 	cnn_t = kad_relu(cnn_t); // 3x3 kernel; 1x1 stride; 0x0 padding
 	//cnn_t = kann_layer_dropout(cnn_t, 0.0);
 	cnn_ann = kann_new(kann_layer_cost(cnn_t, pseudo_image_label->n_col, KANN_C_CEM), 0);
-
+	
 	//set the initial filter
 	for (i = 0; i < 9; ++i){
 		engine->encode(pow(0.1,i), *plaintext);

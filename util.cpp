@@ -221,10 +221,11 @@ inline void print_vector(std::vector<T> vec, size_t print_size, int prec)
 }
 
 void print_ciphertext(SEALCiphertext *cipher){
+	vector<double> output;
 	engine->decrypt(*cipher, *plaintext);
-	engine->decode(*plaintext, t[0]);
-	cout << t[0].size() << endl;
-	print_vector(t[0]);
+	engine->decode(*plaintext, output);
+	cout << output.size() << endl;
+	print_vector(output);
 }
 
 /**

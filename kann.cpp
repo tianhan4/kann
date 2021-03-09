@@ -13,7 +13,6 @@
 #include "util.h"
 
 int kann_verbose = 3;
-extern bool remote;
 extern std::shared_ptr<SEALEngine> engine;
 extern SEALPlaintext *plaintext;
 extern SEALCiphertext *ciphertext;
@@ -100,12 +99,11 @@ SEALCiphertext ** _g_c)
 	for(i = 0; i < n_var; i++) {
 		g_c[i].init(engine);
 		g_c[i].clean() = true;
+		g_c[i].size() = 0;
 	}
 
 	kad_ext_sync(n, a, c, x, x_c, g, g_c);
 }
-
-
 
 // From the cost node, including all roots altogether, build the model.
 kann_t *kann_new(kad_node_t *cost, int n_rest, ...)
@@ -218,8 +216,10 @@ static float kann_cost_core(kann_t *a, int cost_label, int cal_grad, double lr)
 	cost_c = *kad_eval_at(a->n, a->v, i_cost);
 	if (cal_grad) kad_grad(a->n, a->v, i_cost, engine->noise_mode(), lr);
 	hewrapper::sum_vector(cost_c);
-	if (remote){
-		assert(false);
+	if (engine->remote_mode()){
+		engine->decrypt(cost_c, *plaintext);
+		engine->decode(*plaintext, t[0]);
+		cost = t[0][0];
 	}else{
 		engine->decrypt(cost_c, *plaintext);
 		engine->decode(*plaintext, t[0]);
@@ -349,6 +349,7 @@ kann_t *kann_load_fp(istream & fs)
 	for(i = 0; i < n_var; i++) {
 		ann->g_c[i].init(engine);
 		ann->g_c[i].clean() = true;
+		ann->g_c[i].size() = 0;
 	}
 
 	fs.read((char *)ann->x, sizeof(float) * n_unencrypted_var);

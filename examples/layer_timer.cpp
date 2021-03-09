@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 #include <omp.h>
+#include "NetIO.h"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
 #include "util.h"
@@ -11,7 +12,7 @@ using namespace std;
 int test_bandwidth_download = 12; //MBit/s
 int test_bandwidth_uploadc= 6; //MBit/s
 
-
+bool encrypted = false;
 static kann_t *lenet_gen(unsigned int n_labels)
 {
     kad_node_t *lenet;
@@ -19,10 +20,10 @@ static kann_t *lenet_gen(unsigned int n_labels)
     assert(n_labels > 0);
 
     lenet = kad_feed(3, 1, 28, 28), lenet->ext_flag |= KANN_F_IN;   //because we don't have batch, thus the dimension num is 3.
-    lenet = kann_layer_conv2d(lenet, 5, 5, 5, 2, 2, KAD_PAD_SAME, KAD_PAD_SAME, false);
-    lenet = kann_layer_bias(lenet, false);
+    lenet = kann_layer_conv2d(lenet, 5, 5, 5, 2, 2, KAD_PAD_SAME, KAD_PAD_SAME, encrypted);
+    lenet = kann_layer_bias(lenet, true);
     lenet = kad_relu(lenet);
-    lenet = kad_relu(kann_layer_dense(lenet, 100, false, false));
+    lenet = kad_relu(kann_layer_dense(lenet, 100, encrypted, true));
     
     
     ///** best model for mnist
@@ -42,9 +43,9 @@ static kann_t *lenet_gen(unsigned int n_labels)
     // lenet = kad_relu(kann_layer_dense(lenet, 84));
 
     if (n_labels == 1)
-        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB, false, false), 0);
+        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEB, encrypted, true), 0);
     else
-        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEM, false, false), 0);
+        return kann_new(kann_layer_cost(lenet, n_labels, KANN_C_CEM, encrypted, true), 0);
 }
 
 void setup_engine(int batch_size, const string& base_dir)
@@ -54,7 +55,7 @@ void setup_engine(int batch_size, const string& base_dir)
     cout << "set up the encryption engine" << endl;
     size_t poly_modulus_degree = 8192;
 	size_t standard_scale = 24;
-    std::vector<int> coeff_modulus = {30, 24, 24, 24, 30};
+    std::vector<int> coeff_modulus = {50, 24, 24, 24, 30};
     SEALEncryptionParameters parms(poly_modulus_degree,
                     coeff_modulus,
                     seal_scheme::CKKS);
@@ -97,12 +98,16 @@ void setup_engine(int batch_size, const string& base_dir)
 		truth_t[i].resize(engine->max_slot());
 	}
 
-	//engine->zero = new SEALCiphertext(engine);
-	//engine->encode(0, *plaintext);
-	//engine->encrypt(*plaintext, *(engine->zero));
-    engine->zero = nullptr;
-    engine->lazy_relinearization() = false;
+	engine->zero = new SEALCiphertext(engine);
+	engine->encode(0, *plaintext);
+	engine->encrypt(*plaintext, *(engine->zero));
+
+    //engine->zero = nullptr;
+    engine->lazy_relinearization() = true;
     engine->lazy_mode() = true;    
+    //network
+    //engine->createNetworkIO(nullptr, 17722);
+    //engine->remote_mode()=true;
 }
 
 int main(int argc, char *argv[])

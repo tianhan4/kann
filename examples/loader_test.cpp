@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
+#include "NetIO.h"
 #include "kann.h"
 #include "kann_extra/kann_data.h"
 #include "util.h"
